@@ -1,0 +1,365 @@
+{% extends "base.html" %}
+{% block title %}Analysis - Signal Viewer{% endblock %}
+{% block content %}
+
+<!-- No module-header on analysis — all content scrolls -->
+<div class="module-content">
+  <!-- Empty state -->
+  <div id="analysisEmpty" class="card text-center" style="padding:3rem">
+    <p class="text-muted">Select a file and click a signal in the sidebar to begin analysis.</p>
+  </div>
+
+  <!-- Analysis content (hidden until signal selected) -->
+  <div id="analysisContent" class="hidden">
+
+    <!-- Section title: batch / signal name -->
+    <h2 id="analysisSectionTitle" class="analysis-section-title"></h2>
+
+    <!-- Row 1: Summary stats + Value histogram -->
+    <div class="analysis-row">
+      <!-- Summary stats card -->
+      <div class="analysis-stats-card card">
+        <div class="card-header"><h3>Signal Statistics</h3></div>
+        <div class="card-body">
+          <div id="statsGrid" class="stats-list"></div>
+        </div>
+      </div>
+
+      <!-- Value histogram -->
+      <div class="analysis-hist-card card">
+        <div class="card-body" style="padding:0">
+          <div id="histogramPlot" class="plot-area" style="width:100%;min-height:340px"></div>
+        </div>
+      </div>
+    </div>
+
+    <!-- Row 2: Rainflow cycle counting -->
+    <div class="analysis-row" style="margin-top:var(--spacing-lg)">
+      <!-- Rainflow summary + percentile table -->
+      <div class="analysis-stats-card card">
+        <div class="card-header"><h3>Rainflow Cycle Counting</h3></div>
+        <div class="card-body">
+          <div id="rainflowSummary" class="stats-list"></div>
+          <div id="rainflowTable"></div>
+        </div>
+      </div>
+
+      <!-- Rainflow histogram -->
+      <div class="analysis-hist-card card">
+        <div class="card-body" style="padding:0">
+          <div id="rainflowPlot" class="plot-area" style="width:100%;min-height:340px"></div>
+        </div>
+      </div>
+    </div>
+
+  </div>
+</div>
+
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// ============================================================================
+// ANALYSIS MODULE
+// ============================================================================
+
+let currentSignal = { batch: null, idx: null, name: '', units: '' };
+let lastStatsResult = null;
+let lastHistValues = null;
+
+const FMT_DECIMALS = 6;
+
+function fmtVal(v) {
+  if (v == null || isNaN(v)) return 'N/A';
+  const abs = Math.abs(v);
+  if (abs >= 1e6 || (abs < 1e-3 && abs !== 0)) return v.toExponential(FMT_DECIMALS);
+  return v.toFixed(FMT_DECIMALS);
+}
+
+// ── Load stats from backend ───────────────────────────────────────────────
+
+async function loadAnalysis(batch, idx, name, units) {
+  currentSignal = { batch, idx, name, units };
+  updateUI();
+
+  try {
+    showLoading('Computing statistics\u2026');
+    const result = await apiPost('/api/analysis/stats', {
+      file_path: GlobalNav.filePath,
+      batch: batch,
+      signal_idx: idx,
+      rainflow_bins: 10
+    });
+
+    const encoded = encodePath(GlobalNav.filePath);
+    const sigUrl = `/api/files/${encoded}/batches/${encodeURIComponent(batch)}/signals/${idx}?downsample=5000`;
+    const sigData = await apiFetch(sigUrl);
+    hideLoading();
+
+    lastStatsResult = result;
+    lastHistValues = sigData.values;
+
+    renderStats(result);
+    renderHistogram(sigData.values, units);
+    renderRainflow(result.rainflow, units);
+    GlobalNav.updateSidebarHighlights([
+      { batch, idx, color: '#0077cc' }
+    ]);
+    saveAnalysisState();
+  } catch (err) {
+    hideLoading();
+    showToast(`Stats failed: ${err.message}`, 'error');
+  }
+}
+
+// ── Render summary stats (one value per row) ─────────────────────────────
+
+function renderStats(data) {
+  const grid = document.getElementById('statsGrid');
+  grid.innerHTML = '';
+
+  const items = [
+    { key: 'max',          label: 'Maximum' },
+    { key: 'min',          label: 'Minimum' },
+    { key: 'peak_to_peak', label: 'Peak-to-Peak' }
+  ];
+
+  items.forEach(({ key, label }) => {
+    grid.appendChild(statRow(label, fmtVal(data[key]), currentSignal.units));
+  });
+}
+
+// ── Render rainflow: summary + percentile table + histogram ──────────────
+
+function renderRainflow(rf, units) {
+  const summary = document.getElementById('rainflowSummary');
+  const tableEl = document.getElementById('rainflowTable');
+  summary.innerHTML = '';
+  tableEl.innerHTML = '';
+
+  if (!rf) return;
+
+  // Summary rows
+  summary.appendChild(statRow('Total Full Cycles', rf.total_cycles));
+
+  // Max cycle value
+  if (rf.ranges && rf.ranges.length > 0) {
+    let maxVal = -Infinity;
+    for (let i = 0; i < rf.ranges.length; i++) {
+      if (rf.ranges[i] > maxVal) maxVal = rf.ranges[i];
+    }
+    summary.appendChild(statRow('Max Cycle Range', fmtVal(maxVal), units));
+  }
+
+  // Percentile table (every 10th percentile)
+  if (rf.ranges && rf.ranges.length > 0) {
+    const sorted = rf.ranges.slice().sort((a, b) => a - b);
+    const n = sorted.length;
+
+    // Build percentile data: for each percentile, show the cycle value
+    // and the number of cycles at or above that threshold
+    const rows = [];
+    for (let p = 10; p <= 100; p += 10) {
+      const idx = Math.min(Math.floor((p / 100) * n), n - 1);
+      const val = sorted[idx];
+      // Count cycles with range >= this value
+      let count = 0;
+      for (let j = 0; j < n; j++) {
+        if (sorted[j] >= val) { count = n - j; break; }
+      }
+      rows.push({ percentile: p, value: val, count });
+    }
+
+    const table = document.createElement('table');
+    table.className = 'percentile-table';
+    table.innerHTML = `
+      <thead>
+        <tr>
+          <th>Percentile</th>
+          <th>Cycle Range${units ? ' (' + escapeHtml(units) + ')' : ''}</th>
+          <th>Cycles \u2265 Value</th>
+        </tr>
+      </thead>
+      <tbody>
+        ${rows.map(r => `
+          <tr>
+            <td>${r.percentile}th</td>
+            <td class="mono">${fmtVal(r.value)}</td>
+            <td class="mono">${r.count}</td>
+          </tr>
+        `).join('')}
+      </tbody>
+    `;
+    tableEl.appendChild(table);
+  }
+
+  renderRainflowHistogram(rf, units);
+}
+
+function renderRainflowHistogram(rf, units) {
+  const el = document.getElementById('rainflowPlot');
+
+  if (!rf || !rf.counts || rf.counts.length === 0) {
+    Plotly.newPlot(el, [], {
+      annotations: [{
+        text: 'No rainflow cycles detected', xref: 'paper', yref: 'paper',
+        x: 0.5, y: 0.5, showarrow: false,
+        font: { size: 13, color: '#8e90a6' }
+      }],
+      xaxis: { visible: false }, yaxis: { visible: false },
+      plot_bgcolor: PLOT_CONFIG.bg, paper_bgcolor: PLOT_CONFIG.paperBg,
+      margin: { l: 20, r: 20, t: 20, b: 20 }
+    }, { responsive: true });
+    return;
+  }
+
+  const edges = rf.bin_edges || [];
+  const counts = rf.counts || [];
+  const labels = [];
+  for (let i = 0; i < counts.length; i++) {
+    if (edges.length > i + 1) {
+      labels.push(((edges[i] + edges[i + 1]) / 2).toFixed(FMT_DECIMALS));
+    } else {
+      labels.push(`Bin ${i + 1}`);
+    }
+  }
+
+  const unitLabel = units ? ` (${units})` : '';
+
+  const trace = {
+    x: labels, y: counts,
+    type: 'bar',
+    marker: { color: '#e65100', opacity: 0.85 },
+    hovertemplate: 'Range: %{x}' + unitLabel + '<br>Cycles: %{y}<extra></extra>'
+  };
+
+  const layout = {
+    title: { text: 'Cycle Range Distribution', font: { size: 14, color: '#1a1a2e' } },
+    xaxis: {
+      title: `Cycle Range${unitLabel}`,
+      tickangle: -45, tickfont: { size: 10 },
+      ...PLOT_CONFIG.axis
+    },
+    yaxis: { title: 'Cycle Count', ...PLOT_CONFIG.axis },
+    margin: { l: 56, r: 24, t: 48, b: 80 },
+    plot_bgcolor: PLOT_CONFIG.bg, paper_bgcolor: PLOT_CONFIG.paperBg,
+    font: PLOT_CONFIG.font,
+    hovermode: 'closest', showlegend: false, bargap: 0.15
+  };
+
+  Plotly.newPlot(el, [trace], layout, { responsive: true });
+}
+
+// ── Render value histogram ───────────────────────────────────────────────
+
+function renderHistogram(values, units) {
+  const el = document.getElementById('histogramPlot');
+  const unitLabel = units ? ` (${units})` : '';
+
+  const trace = {
+    x: values,
+    type: 'histogram',
+    nbinsx: 50,
+    marker: { color: '#0077cc', opacity: 0.8 }
+  };
+
+  const layout = {
+    title: { text: 'Value Distribution', font: { size: 14, color: '#1a1a2e' } },
+    xaxis: { title: `Value${unitLabel}`, ...PLOT_CONFIG.axis },
+    yaxis: { title: 'Count', ...PLOT_CONFIG.axis },
+    margin: { l: 56, r: 24, t: 48, b: 56 },
+    plot_bgcolor: PLOT_CONFIG.bg,
+    paper_bgcolor: PLOT_CONFIG.paperBg,
+    font: PLOT_CONFIG.font,
+    hovermode: 'closest', showlegend: false
+  };
+
+  Plotly.newPlot(el, [trace], layout, { responsive: true });
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────────
+
+function statRow(label, value, unit) {
+  const el = document.createElement('div');
+  el.className = 'stat-row';
+  const unitSpan = unit ? `<span class="stat-unit">${escapeHtml(unit)}</span>` : '';
+  el.innerHTML = `
+    <span class="stat-row-label">${escapeHtml(label)}</span>
+    <span class="stat-row-value">${escapeHtml(String(value))}${unitSpan}</span>
+  `;
+  return el;
+}
+
+// ── UI management ─────────────────────────────────────────────────────────
+
+function updateUI() {
+  const empty   = document.getElementById('analysisEmpty');
+  const content = document.getElementById('analysisContent');
+  const title   = document.getElementById('analysisSectionTitle');
+
+  if (currentSignal.batch !== null && currentSignal.idx !== null) {
+    empty.classList.add('hidden');
+    content.classList.remove('hidden');
+    // Section title: batch / signal name
+    title.textContent = [currentSignal.batch, currentSignal.name].filter(Boolean).join(' / ');
+  } else {
+    empty.classList.remove('hidden');
+    content.classList.add('hidden');
+  }
+}
+
+// ── State persistence ─────────────────────────────────────────────────────
+
+function saveAnalysisState() {
+  try {
+    sessionStorage.setItem('analysisState', JSON.stringify({
+      signal: currentSignal,
+      stats: lastStatsResult,
+      histValues: lastHistValues
+    }));
+  } catch (e) {
+    console.warn('analysisState save failed (storage full?):', e);
+  }
+}
+
+function restoreAnalysisState() {
+  const raw = sessionStorage.getItem('analysisState');
+  if (!raw) return;
+  try {
+    const state = JSON.parse(raw);
+    if (!state.signal || state.signal.batch === null) return;
+
+    currentSignal = state.signal;
+    updateUI();
+
+    if (state.stats) {
+      lastStatsResult = state.stats;
+      renderStats(state.stats);
+      renderRainflow(state.stats.rainflow, currentSignal.units);
+    }
+    if (state.histValues) {
+      lastHistValues = state.histValues;
+      renderHistogram(state.histValues, currentSignal.units);
+    }
+
+    GlobalNav.updateSidebarHighlights([
+      { batch: currentSignal.batch, idx: currentSignal.idx, color: '#0077cc' }
+    ]);
+  } catch (e) {
+    console.warn('analysisState restore failed:', e);
+  }
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────
+
+document.addEventListener('DOMContentLoaded', async () => {
+  if (GlobalNav._ready) await GlobalNav._ready;
+
+  GlobalNav.onSidebarSignalClick = (batch, idx, name, units) => {
+    loadAnalysis(batch, idx, name, units);
+  };
+
+  restoreAnalysisState();
+});
+</script>
+{% endblock %}

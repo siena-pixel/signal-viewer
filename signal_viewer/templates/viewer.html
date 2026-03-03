@@ -1,0 +1,415 @@
+{% extends "base.html" %}
+
+{% block title %}Viewer - Signal Viewer{% endblock %}
+
+{% block content %}
+<!-- Module header (fixed at top of module area — never scrolls) -->
+<div class="module-header">
+  <div class="module-controls">
+    <div class="form-group">
+      <label for="layoutSelect">Layout</label>
+      <select id="layoutSelect" onchange="setPlotMode(this.value)">
+        <option value="overlay">Same Axis</option>
+        <option value="subplots">Subplots</option>
+      </select>
+    </div>
+    <div class="flex-1"></div>
+    <button class="btn btn-secondary btn-sm" onclick="clearAll()">Clear All</button>
+  </div>
+  <div id="signalCards" class="signal-cards-row"></div>
+</div>
+
+<!-- Scrollable content area -->
+<div class="module-content">
+  <div class="plot-wrapper flex-fill">
+    <div id="plotArea" class="plot-area"></div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// ============================================================================
+// VIEWER MODULE
+// ============================================================================
+
+const MAX_SIGNALS = 5;
+const OVERLAY_HEIGHT = 520;
+const SUBPLOT_HEIGHT_PER = 300;
+
+let plotMode = 'overlay';
+const signals = [];  // { batch, idx, name, units, time, values, color }
+let _plotEl = null;  // reference to plot div for crosshair updates
+
+/**
+ * Detect time units from an array of time values.
+ * Returns { label, short } e.g. { label: 'Time (s)', short: 's' }
+ */
+function detectTimeUnits(timeArr) {
+  if (!timeArr || timeArr.length < 2) return { label: 'Time (s)', short: 's' };
+  const tMax = timeArr[timeArr.length - 1];
+  const tMin = timeArr[0];
+  const span = Math.abs(tMax - tMin);
+  if (span < 0.5)   return { label: 'Time (ms)', short: 'ms' };
+  if (span > 7200)   return { label: 'Time (min)', short: 'min' };
+  return { label: 'Time (s)', short: 's' };
+}
+
+// ── Signal management ─────────────────────────────────────────────────────
+
+async function addSignal(batch, idx, name, units) {
+  if (signals.length >= MAX_SIGNALS) {
+    showToast(`Maximum ${MAX_SIGNALS} signals`, 'warning');
+    return;
+  }
+
+  // Prevent duplicates
+  const key = `${batch}::${idx}`;
+  if (signals.some(s => `${s.batch}::${s.idx}` === key)) {
+    showToast('Signal already loaded', 'info');
+    return;
+  }
+
+  try {
+    showLoading('Loading signal\u2026');
+    const url = GlobalNav.signalUrl(batch, idx, APP_CONFIG.DEFAULT_DOWNSAMPLE);
+    const data = await apiFetch(url);
+    hideLoading();
+
+    const tUnits = detectTimeUnits(data.time);
+    signals.push({
+      batch, idx,
+      name: data.name || name,
+      units: data.units || units,
+      time: data.time,
+      values: data.values,
+      color: getSignalColor(signals.length),
+      timeUnits: tUnits
+    });
+
+    renderAll();
+  } catch (err) {
+    hideLoading();
+    showToast(`Failed to load signal: ${err.message}`, 'error');
+  }
+}
+
+function removeSignal(index) {
+  signals.splice(index, 1);
+  signals.forEach((s, i) => { s.color = getSignalColor(i); });
+  renderAll();
+}
+
+function clearAll() {
+  signals.length = 0;
+  renderAll();
+}
+
+function setPlotMode(mode) {
+  plotMode = mode;
+  renderAll();
+}
+
+// ── Rendering ─────────────────────────────────────────────────────────────
+
+function renderAll() {
+  renderCards();
+  renderPlot();
+  updateSidebarActive();
+  saveState();
+}
+
+function updateSidebarActive() {
+  GlobalNav.updateSidebarHighlights(
+    signals.map(s => ({ batch: s.batch, idx: s.idx, color: s.color }))
+  );
+}
+
+function renderCards() {
+  const container = document.getElementById('signalCards');
+  container.innerHTML = '';
+
+  signals.forEach((sig, i) => {
+    const card = document.createElement('div');
+    card.className = 'signal-card';
+    card.style.borderLeftColor = sig.color;
+    card.innerHTML = `
+      <div class="card-close" onclick="removeSignal(${i})">\u2715</div>
+      <div class="card-batch">${escapeHtml(sig.batch)}</div>
+      <div class="card-name" style="color:${sig.color}">${escapeHtml(sig.name)}</div>
+      <div class="card-value" id="cv-${i}">\u2014</div>
+      <div class="card-hover-info" id="chi-${i}"></div>
+      <div class="card-meta">${escapeHtml(sig.units)}</div>
+    `;
+    container.appendChild(card);
+  });
+}
+
+// ── Plotting ──────────────────────────────────────────────────────────────
+
+function renderPlot() {
+  const el = document.getElementById('plotArea');
+  if (signals.length === 0) {
+    Plotly.newPlot(el, [], {
+      xaxis: { visible: false }, yaxis: { visible: false },
+      plot_bgcolor: PLOT_CONFIG.bg, paper_bgcolor: PLOT_CONFIG.paperBg,
+      margin: PLOT_CONFIG.margin,
+      annotations: [{
+        text: 'Click a signal in the sidebar to begin',
+        xref: 'paper', yref: 'paper', x: 0.5, y: 0.5,
+        showarrow: false, font: { size: 14, color: '#8e90a6' }
+      }]
+    }, { responsive: true });
+    return;
+  }
+
+  if (plotMode === 'overlay') plotOverlay(el);
+  else plotSubplots(el);
+
+  el.on('plotly_hover', onHover);
+  el.on('plotly_unhover', onUnhover);
+
+  // Track plot element for crosshair shape updates
+  _plotEl = el;
+}
+
+function plotOverlay(el) {
+  const traces = signals.map(sig => ({
+    x: sig.time, y: sig.values,
+    name: legendLabel(sig),
+    type: 'scattergl', mode: 'lines',
+    line: { color: sig.color, width: 1.5 },
+    hoverinfo: 'none'
+  }));
+
+  const yRange = computeYRange(signals.map(s => s.values));
+
+  const tLabel = signals[0].timeUnits ? signals[0].timeUnits.label : 'Time (s)';
+
+  const layout = {
+    xaxis: {
+      title: tLabel,
+      showspikes: true, spikemode: 'across', spikethickness: 1,
+      spikecolor: '#999', spikesnap: 'cursor', spikedash: 'solid',
+      ...PLOT_CONFIG.axis
+    },
+    yaxis: { title: 'Value', range: yRange, ...PLOT_CONFIG.axis },
+    plot_bgcolor: PLOT_CONFIG.bg, paper_bgcolor: PLOT_CONFIG.paperBg,
+    font: PLOT_CONFIG.font,
+    height: OVERLAY_HEIGHT,
+    margin: PLOT_CONFIG.margin,
+    hovermode: 'x', hoverdistance: -1,
+    showlegend: true,
+    legend: { x: 0.01, y: 0.99, ...PLOT_CONFIG.legend }
+  };
+
+  Plotly.newPlot(el, traces, layout, {
+    responsive: true, displayModeBar: true,
+    modeBarButtonsToRemove: ['lasso2d', 'select2d']
+  });
+}
+
+function plotSubplots(el) {
+  const n = signals.length;
+  const totalHeight = 100 + n * SUBPLOT_HEIGHT_PER;
+  const gap = 0.08;
+  const hPerSub = (1 - (n - 1) * gap) / n;
+
+  const traces = [];
+  const layout = {
+    plot_bgcolor: PLOT_CONFIG.bg, paper_bgcolor: PLOT_CONFIG.paperBg,
+    font: PLOT_CONFIG.font,
+    height: totalHeight, margin: PLOT_CONFIG.margin,
+    hovermode: 'x', hoverdistance: -1,
+    showlegend: true
+  };
+
+  signals.forEach((sig, i) => {
+    const yRange = computeYRange([sig.values]);
+    const domBot = 1 - (i + 1) * hPerSub - i * gap;
+    const domTop = domBot + hPerSub;
+
+    const xKey = i === 0 ? 'xaxis' : `xaxis${i + 1}`;
+    const yKey = i === 0 ? 'yaxis' : `yaxis${i + 1}`;
+
+    // Per-subplot legend name (e.g. legend, legend2, legend3…)
+    const legendKey = i === 0 ? 'legend' : `legend${i + 1}`;
+
+    const tLabel = sig.timeUnits ? sig.timeUnits.label : 'Time (s)';
+    layout[xKey] = {
+      title: tLabel,
+      anchor: i === 0 ? 'y' : `y${i + 1}`,
+      ...(i > 0 ? { matches: 'x' } : {}),
+      ...PLOT_CONFIG.axis
+    };
+    layout[yKey] = {
+      title: sig.units || 'Value',
+      domain: [domBot, domTop], range: yRange,
+      anchor: i === 0 ? 'x' : `x${i + 1}`,
+      ...PLOT_CONFIG.axis
+    };
+
+    // Position each legend inside its own subplot domain
+    layout[legendKey] = {
+      x: 0.01, y: domTop, xanchor: 'left', yanchor: 'top',
+      ...PLOT_CONFIG.legend
+    };
+
+    traces.push({
+      x: sig.time, y: sig.values,
+      name: legendLabel(sig),
+      type: 'scattergl', mode: 'lines',
+      line: { color: sig.color, width: 1.5 },
+      hoverinfo: 'none',
+      xaxis: i === 0 ? 'x' : `x${i + 1}`,
+      yaxis: i === 0 ? 'y' : `y${i + 1}`,
+      legend: legendKey
+    });
+  });
+
+  Plotly.newPlot(el, traces, layout, {
+    responsive: true, displayModeBar: true,
+    modeBarButtonsToRemove: ['lasso2d', 'select2d']
+  });
+}
+
+// ── Hover ─────────────────────────────────────────────────────────────────
+
+function onHover(ev) {
+  if (!ev.points || ev.points.length === 0) return;
+  const hoverX = ev.points[0].x;
+
+  // Update card values with time (with units), sample index, and value
+  signals.forEach((sig, i) => {
+    const valEl = document.getElementById(`cv-${i}`);
+    const infoEl = document.getElementById(`chi-${i}`);
+    if (!valEl) return;
+    const j = bsClosest(sig.time, hoverX);
+    if (j >= 0 && j < sig.values.length) {
+      valEl.textContent = formatNumber(sig.values[j]);
+      if (infoEl) {
+        const tUnit = sig.timeUnits ? sig.timeUnits.short : 's';
+        infoEl.textContent = `t = ${formatNumber(sig.time[j])} ${tUnit}  \u2502  sample ${j}`;
+      }
+    } else {
+      valEl.textContent = '\u2014';
+      if (infoEl) infoEl.textContent = '';
+    }
+  });
+
+  // Draw synced vertical crosshair lines across all subplots
+  if (_plotEl && plotMode === 'subplots' && signals.length > 0) {
+    const shapes = signals.map((_, i) => ({
+      type: 'line',
+      x0: hoverX, x1: hoverX, y0: 0, y1: 1,
+      xref: i === 0 ? 'x' : `x${i + 1}`,
+      yref: i === 0 ? 'y domain' : `y${i + 1} domain`,
+      line: { color: '#999', width: 1 }
+    }));
+    Plotly.relayout(_plotEl, { shapes });
+  }
+}
+
+function onUnhover() {
+  signals.forEach((_, i) => {
+    const valEl = document.getElementById(`cv-${i}`);
+    const infoEl = document.getElementById(`chi-${i}`);
+    if (valEl) valEl.textContent = '\u2014';
+    if (infoEl) infoEl.textContent = '';
+  });
+
+  // Remove crosshair shapes
+  if (_plotEl && plotMode === 'subplots') {
+    Plotly.relayout(_plotEl, { shapes: [] });
+  }
+}
+
+function bsClosest(arr, target) {
+  let lo = 0, hi = arr.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid] < target) lo = mid + 1; else hi = mid;
+  }
+  if (lo > 0 && Math.abs(arr[lo - 1] - target) < Math.abs(arr[lo] - target)) return lo - 1;
+  return lo;
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+
+function computeYRange(arraysOfValues) {
+  let min = Infinity, max = -Infinity;
+  arraysOfValues.forEach(arr => {
+    for (let i = 0; i < arr.length; i++) {
+      const v = arr[i];
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+  });
+  if (!isFinite(min)) return [0, 1];
+  const span = max - min || 1;
+  return [min - 0.05 * span, max + 0.05 * span];
+}
+
+function legendLabel(sig) {
+  const base = [sig.batch, sig.name].filter(Boolean).join(' / ');
+  return sig.units ? `${base} (${sig.units})` : base;
+}
+
+// ── State persistence ─────────────────────────────────────────────────────
+
+function saveState() {
+  try {
+    sessionStorage.setItem('viewerState', JSON.stringify({
+      signals: signals.map(s => ({
+        batch: s.batch, idx: s.idx, name: s.name, units: s.units,
+        time: s.time, values: s.values
+      })),
+      plotMode
+    }));
+  } catch (e) {
+    console.warn('viewerState save failed (storage full?):', e);
+  }
+}
+
+function restoreState() {
+  const raw = sessionStorage.getItem('viewerState');
+  if (!raw) return;
+  try {
+    const state = JSON.parse(raw);
+    if (state.plotMode) {
+      plotMode = state.plotMode;
+      const sel = document.getElementById('layoutSelect');
+      if (sel) sel.value = plotMode;
+    }
+    if (state.signals && state.signals.length > 0) {
+      state.signals.forEach((s, i) => {
+        if (s.time && s.values) {
+          signals.push({
+            batch: s.batch, idx: s.idx, name: s.name, units: s.units,
+            time: s.time, values: s.values,
+            color: getSignalColor(i),
+            timeUnits: detectTimeUnits(s.time)
+          });
+        }
+      });
+      if (signals.length > 0) renderAll();
+    }
+  } catch (e) {
+    console.warn('viewerState restore failed:', e);
+  }
+}
+
+// ── Init ──────────────────────────────────────────────────────────────────
+
+document.addEventListener('DOMContentLoaded', async () => {
+  if (GlobalNav._ready) await GlobalNav._ready;
+
+  GlobalNav.onSidebarSignalClick = (batch, idx, name, units) => {
+    addSignal(batch, idx, name, units);
+  };
+
+  restoreState();
+  if (signals.length === 0) renderPlot();
+});
+</script>
+{% endblock %}

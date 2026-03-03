@@ -1,0 +1,448 @@
+{% extends "base.html" %}
+
+{% block title %}Documentation - Signal Viewer{% endblock %}
+
+{% block file_selector %}{% endblock %}
+
+{% block sidebar %}{% endblock %}
+
+{% block content %}
+<div class="module-content">
+<div class="docs-container">
+  <div class="docs-content">
+    <h1>Signal Viewer Documentation</h1>
+
+    <details open>
+      <summary><h2>Getting Started</h2></summary>
+      <h3>Installation</h3>
+      <p>Clone the repository and install dependencies:</p>
+      <pre><code>git clone &lt;repo-url&gt;
+cd signal_viewer
+pip install -r requirements.txt</code></pre>
+
+      <h3>Setup</h3>
+      <p>Set the HDF5 data root directory:</p>
+      <pre><code>export DATA_ROOT=/path/to/hdf5/files</code></pre>
+      <p>Start the development server:</p>
+      <pre><code>python -m signal_viewer.server.app</code></pre>
+      <p>Open your browser and navigate to <code>http://localhost:8000</code></p>
+    </details>
+
+    <details>
+      <summary><h2>Data Format</h2></summary>
+      <h3>HDF5 Structure</h3>
+      <p>Signal Viewer expects HDF5 files organized as follows:</p>
+      <pre><code>DATA_ROOT/
+├── serial_name/
+│   ├── step_001/
+│   │   └── batch_file.h5
+│   │       ├── batch_001/
+│   │       │   ├── signal_000
+│   │       │   ├── signal_001
+│   │       │   └── ...
+│   │       └── batch_002/
+│   └── step_002/
+└── other_serial/</code></pre>
+
+      <h3>Signal Requirements</h3>
+      <ul>
+        <li>Signals stored as HDF5 datasets within batch groups</li>
+        <li>Each signal is a 1D float array (time series data)</li>
+        <li>Metadata attributes optional: <code>units</code>, <code>sample_rate</code>, <code>description</code></li>
+        <li>Supported file extensions: <code>.h5</code>, <code>.hdf5</code></li>
+      </ul>
+    </details>
+
+    <details>
+      <summary><h2>Navigation</h2></summary>
+      <h3>File Selection</h3>
+      <p>The navigation bar at the top provides three cascading dropdowns:</p>
+      <ul>
+        <li><strong>Serial</strong>: Select a test serial or unit identifier</li>
+        <li><strong>Step</strong>: Choose a test step (populated after serial selection)</li>
+        <li><strong>File</strong>: Select a specific HDF5 file (populated after step selection)</li>
+      </ul>
+
+      <h3>Sidebar Navigation</h3>
+      <p>The left sidebar displays available signals from the selected file:</p>
+      <ul>
+        <li>Click a signal to view it</li>
+        <li>Signals are numbered (signal_000, signal_001, etc.)</li>
+        <li>Batch information displayed for context</li>
+      </ul>
+
+      <h3>Main Navigation</h3>
+      <p>Top navigation menu links to main sections:</p>
+      <ul>
+        <li><strong>Viewer</strong>: View and analyze individual signals</li>
+        <li><strong>Analysis</strong>: Statistical analysis and processing</li>
+        <li><strong>Comparison</strong>: Compare multiple signals</li>
+        <li><strong>Docs</strong>: This documentation</li>
+      </ul>
+    </details>
+
+    <details>
+      <summary><h2>Viewer</h2></summary>
+      <h3>Display Modes</h3>
+      <p>The viewer supports multiple visualization modes:</p>
+      <ul>
+        <li><strong>Overlay Mode</strong>: Stack up to 5 signals on the same plot</li>
+        <li><strong>Subplot Mode</strong>: Display each signal in a separate subplot</li>
+      </ul>
+
+      <h3>Signal Cards</h3>
+      <p>Each loaded signal displays a card with:</p>
+      <ul>
+        <li>Signal name and metadata</li>
+        <li>Basic statistics (min, max, mean, std)</li>
+        <li>Remove button to unload the signal</li>
+        <li>Visual indicator showing signal color in plot</li>
+      </ul>
+
+      <h3>Interactive Features</h3>
+      <ul>
+        <li><strong>Hover Information</strong>: Display data values and coordinates on hover</li>
+        <li><strong>Zoom</strong>: Click and drag to zoom into regions of interest</li>
+        <li><strong>Pan</strong>: Hold shift and drag to pan across the signal</li>
+        <li><strong>Reset View</strong>: Double-click to reset zoom/pan</li>
+      </ul>
+
+      <h3>Signal Limit</h3>
+      <p>Up to 5 signals can be loaded simultaneously to maintain performance. Remove signals as needed to load new ones.</p>
+    </details>
+
+    <details>
+      <summary><h2>Analysis</h2></summary>
+      <h3>Statistics</h3>
+      <p>Detailed statistical analysis of loaded signals:</p>
+      <ul>
+        <li><strong>Descriptive Stats</strong>: Min, max, mean, standard deviation, median</li>
+        <li><strong>Distribution</strong>: Histogram showing value distribution</li>
+        <li><strong>Rainflow Cycle Counting</strong>: ASTM E1049 compliant cycle detection</li>
+      </ul>
+
+      <h3>Rainflow Cycle Counting</h3>
+      <p>Identifies stress cycles in the signal data using the standard rainflow algorithm:</p>
+      <ul>
+        <li>Detects local minima and maxima</li>
+        <li>Counts cycles and calculates range for each cycle</li>
+        <li>Useful for fatigue analysis and life prediction</li>
+        <li>Results displayed in summary table and histogram</li>
+      </ul>
+
+      <h3>Histogram</h3>
+      <p>Visualizes the distribution of signal values:</p>
+      <ul>
+        <li>Automatically determines appropriate bin sizing</li>
+        <li>Shows frequency of values in each bin</li>
+        <li>Supports overlay of multiple signal histograms</li>
+      </ul>
+    </details>
+
+    <details>
+      <summary><h2>Comparison</h2></summary>
+      <h3>Overlay Comparison</h3>
+      <p>Display two signals on the same plot to compare waveforms directly. Useful for:</p>
+      <ul>
+        <li>Comparing signals from different test conditions</li>
+        <li>Identifying differences in amplitude and phase</li>
+        <li>Visual alignment of features</li>
+      </ul>
+
+      <h3>X vs Y Correlation</h3>
+      <p>Scatter plot showing the relationship between two signals:</p>
+      <ul>
+        <li>X-axis: First signal values</li>
+        <li>Y-axis: Second signal values</li>
+        <li>Reveals nonlinear relationships and hysteresis</li>
+      </ul>
+
+      <h3>Combined Histogram</h3>
+      <p>Overlay histograms of two signals for distribution comparison:</p>
+      <ul>
+        <li>Side-by-side visualization of value ranges</li>
+        <li>Identify differences in statistical properties</li>
+      </ul>
+
+      <h3>Cross-Correlation</h3>
+      <p>Measures similarity and time alignment between signals:</p>
+      <ul>
+        <li>Detects time lags between signals</li>
+        <li>Quantifies correlation strength (-1 to +1)</li>
+        <li>Useful for signal synchronization analysis</li>
+      </ul>
+
+      <h3>Signal Chips</h3>
+      <p>Extract and compare corresponding segments from two signals:</p>
+      <ul>
+        <li>Select time range of interest</li>
+        <li>View zoomed-in details of matched segments</li>
+      </ul>
+    </details>
+
+
+    <details>
+      <summary><h2>API Reference</h2></summary>
+      <h3>Navigation Endpoints</h3>
+      <ul>
+        <li><code>GET /api/serials</code> - List all available serials</li>
+        <li><code>GET /api/serials/{serial}/steps</code> - List steps for a serial</li>
+        <li><code>GET /api/serials/{serial}/steps/{step}/files</code> - List files in a step</li>
+      </ul>
+
+      <h3>Data Endpoints</h3>
+      <ul>
+        <li><code>GET /api/files/{file}/batches</code> - List batches in a file</li>
+        <li><code>GET /api/files/{file}/batches/{batch}/meta</code> - Get batch metadata</li>
+        <li><code>GET /api/files/{file}/batches/{batch}/signals/{index}</code> - Get signal data</li>
+      </ul>
+
+      <h3>Analysis Endpoints</h3>
+      <ul>
+        <li><code>POST /api/analysis/stats</code> - Calculate statistics</li>
+        <li><code>POST /api/analysis/fft</code> - Compute FFT</li>
+        <li><code>POST /api/analysis/psd</code> - Compute power spectral density</li>
+        <li><code>POST /api/analysis/filter</code> - Apply signal filters</li>
+        <li><code>POST /api/analysis/correlation</code> - Calculate cross-correlation</li>
+        <li><code>POST /api/analysis/trend</code> - Analyze signal trends</li>
+        <li><code>POST /api/analysis/anomaly</code> - Detect anomalies</li>
+      </ul>
+
+      <h3>Cache Endpoints</h3>
+      <ul>
+        <li><code>GET /api/cache/stats</code> - Get cache statistics</li>
+        <li><code>POST /api/rescan</code> - Rescan data directory</li>
+      </ul>
+    </details>
+
+    <details>
+      <summary><h2>Keyboard Shortcuts</h2></summary>
+      <h3>Plotting Controls</h3>
+      <ul>
+        <li><strong>Click and drag</strong> - Zoom into region</li>
+        <li><strong>Shift + Click and drag</strong> - Pan across plot</li>
+        <li><strong>Double-click</strong> - Reset zoom/pan</li>
+        <li><strong>Scroll wheel</strong> - Zoom in/out</li>
+        <li><strong>Right-click</strong> - Context menu (save image, etc.)</li>
+      </ul>
+
+      <h3>Navigation</h3>
+      <ul>
+        <li><strong>Alt + V</strong> - Go to Viewer (on supported browsers)</li>
+        <li><strong>Alt + A</strong> - Go to Analysis</li>
+        <li><strong>Alt + C</strong> - Go to Comparison</li>
+        <li><strong>Alt + D</strong> - Go to Docs</li>
+      </ul>
+    </details>
+
+    <details>
+      <summary><h2>Configuration</h2></summary>
+      <h3>Environment Variables</h3>
+      <p>Configure the application using environment variables:</p>
+
+      <ul>
+        <li><code>DATA_ROOT</code> - Root directory containing HDF5 files (required)
+          <br><code>Default: ./data</code></li>
+
+        <li><code>DEBUG</code> - Enable debug mode for development
+          <br><code>Default: False</code>
+          <br><code>Usage: export DEBUG=True</code></li>
+
+        <li><code>HOST</code> - Server host address
+          <br><code>Default: localhost</code>
+          <br><code>Usage: export HOST=0.0.0.0</code></li>
+
+        <li><code>PORT</code> - Server port number
+          <br><code>Default: 8000</code>
+          <br><code>Usage: export PORT=8080</code></li>
+
+        <li><code>CACHE_MAX_MEMORY_MB</code> - Signal cache size in MB
+          <br><code>Default: 512</code>
+          <br><code>Usage: export CACHE_MAX_MEMORY_MB=1024</code></li>
+
+        <li><code>CACHE_CLEANUP_INTERVAL</code> - Cache cleanup interval in seconds
+          <br><code>Default: 300</code></li>
+      </ul>
+
+      <h3>Example Configuration</h3>
+      <pre><code>export DATA_ROOT=/data/hdf5_signals
+export DEBUG=True
+export HOST=0.0.0.0
+export PORT=8080
+export CACHE_MAX_MEMORY_MB=1024</code></pre>
+    </details>
+
+    <details>
+      <summary><h2>Troubleshooting</h2></summary>
+      <h3>No Serials Appearing</h3>
+      <p><strong>Problem:</strong> Serial dropdown is empty after server starts.</p>
+      <ul>
+        <li>Verify <code>DATA_ROOT</code> environment variable is set correctly</li>
+        <li>Check that HDF5 files exist in <code>DATA_ROOT</code></li>
+        <li>Ensure directory permissions allow reading</li>
+        <li>Check server logs for errors: <code>python -m signal_viewer.server.app</code></li>
+      </ul>
+
+      <h3>Signals Not Loading</h3>
+      <p><strong>Problem:</strong> Selected file shows no signals in sidebar.</p>
+      <ul>
+        <li>Verify HDF5 file structure matches expected format</li>
+        <li>Check that signals are stored as datasets in batch groups</li>
+        <li>Use HDF5 viewer tool (e.g., HDFView) to inspect file structure</li>
+        <li>Check browser console for JavaScript errors (F12)</li>
+      </ul>
+
+      <h3>Out of Memory</h3>
+      <p><strong>Problem:</strong> "Cache limit exceeded" error when loading signals.</p>
+      <ul>
+        <li>Increase <code>CACHE_MAX_MEMORY_MB</code> environment variable</li>
+        <li>Reduce number of loaded signals (max 5)</li>
+        <li>Close browser tabs and restart server</li>
+        <li>Check system memory availability</li>
+      </ul>
+
+      <h3>Slow Performance</h3>
+      <p><strong>Problem:</strong> Application is sluggish or unresponsive.</p>
+      <ul>
+        <li>Reduce number of signals loaded simultaneously</li>
+        <li>Close other applications to free system resources</li>
+        <li>Check CPU usage in system monitor</li>
+        <li>Consider reducing plot update frequency in browser developer tools</li>
+      </ul>
+
+      <h3>Plot Not Updating</h3>
+      <p><strong>Problem:</strong> Plot remains blank or shows old data.</p>
+      <ul>
+        <li>Refresh browser page (Ctrl+R or Cmd+R)</li>
+        <li>Clear browser cache and reload</li>
+        <li>Check browser console for JavaScript errors</li>
+        <li>Verify Plotly library loaded: check network requests in DevTools</li>
+      </ul>
+
+      <h3>CORS Errors</h3>
+      <p><strong>Problem:</strong> Browser console shows CORS errors.</p>
+      <ul>
+        <li>Ensure server is running and accessible</li>
+        <li>Check that <code>HOST</code> and <code>PORT</code> match browser location</li>
+        <li>If using reverse proxy, verify CORS headers are set correctly</li>
+      </ul>
+    </details>
+
+  </div>
+</div>
+</div>
+
+<style>
+  .docs-container {
+    padding: 20px;
+    background: var(--color-bg-primary);
+  }
+
+  .docs-content {
+    max-width: 900px;
+    margin: 0 auto;
+    background: var(--color-bg-secondary);
+    padding: 40px;
+    border-radius: 8px;
+    box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
+  }
+
+  .docs-content h1 {
+    margin-top: 0;
+    margin-bottom: 30px;
+    color: var(--color-text-primary);
+    border-bottom: 3px solid var(--color-primary);
+    padding-bottom: 10px;
+  }
+
+  .docs-content details {
+    margin-bottom: 25px;
+    border: 1px solid var(--color-border);
+    border-radius: 6px;
+    padding: 15px;
+    background: var(--color-bg-secondary);
+  }
+
+  .docs-content details[open] {
+    background: var(--color-bg-secondary);
+  }
+
+  .docs-content summary {
+    cursor: pointer;
+    user-select: none;
+    padding: 5px 0;
+  }
+
+  .docs-content summary:hover {
+    opacity: 0.8;
+  }
+
+  .docs-content summary h2 {
+    display: inline;
+    margin: 0;
+    color: var(--color-primary);
+    font-size: 1.3em;
+  }
+
+  .docs-content h3 {
+    margin-top: 20px;
+    margin-bottom: 12px;
+    color: var(--color-text-primary);
+  }
+
+  .docs-content p {
+    margin: 10px 0;
+    line-height: 1.6;
+    color: var(--color-text-secondary);
+  }
+
+  .docs-content ul {
+    margin: 10px 0;
+    padding-left: 25px;
+  }
+
+  .docs-content li {
+    margin: 8px 0;
+    line-height: 1.5;
+    color: var(--color-text-secondary);
+  }
+
+  .docs-content code {
+    background: var(--color-bg-tertiary);
+    padding: 2px 6px;
+    border-radius: 3px;
+    font-family: 'Monaco', 'Courier New', monospace;
+    font-size: 0.9em;
+    color: var(--color-primary);
+  }
+
+  .docs-content pre {
+    background: var(--color-bg-tertiary);
+    border: 1px solid var(--color-border);
+    padding: 15px;
+    border-radius: 6px;
+    overflow-x: auto;
+    margin: 15px 0;
+  }
+
+  .docs-content pre code {
+    background: none;
+    padding: 0;
+    color: var(--color-text-secondary);
+  }
+
+  @media (max-width: 768px) {
+    .docs-content {
+      padding: 20px;
+    }
+
+    .docs-content h1 {
+      font-size: 1.8em;
+    }
+
+    .docs-content summary h2 {
+      font-size: 1.1em;
+    }
+  }
+</style>
+{% endblock %}
