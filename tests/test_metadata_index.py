@@ -139,6 +139,23 @@ class TestMetadataIndex(unittest.TestCase):
         self.assertIn("root", parsed)
         self.assertIn("serial_numbers", parsed)
 
+    def test_serial_prefix_filtering(self):
+        """Test that directories not matching SERIAL_PREFIX are excluded."""
+        # Add a non-matching serial directory
+        bad_serial = self.root_path / "OTHER001"
+        bad_serial.mkdir()
+        folder1_dir = bad_serial / "p001_motor"
+        folder1_dir.mkdir()
+        folder2_dir = folder1_dir / "run_nominal"
+        folder2_dir.mkdir()
+        create_dummy_h5_file(str(folder2_dir / f"test{S.FILE_SUFFIX}"))
+
+        index = MetadataIndex(str(self.root_path))
+        serials = index.get_serial_numbers()
+        self.assertNotIn("OTHER001", serials)
+        self.assertIn("SN001", serials)
+        self.assertIn("SN002", serials)
+
     def test_rescan(self):
         index = MetadataIndex(str(self.root_path))
         serials_before = index.get_serial_numbers()

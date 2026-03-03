@@ -14,6 +14,9 @@ HOST = os.environ.get('SIGNAL_VIEWER_HOST', '127.0.0.1')
 PORT = int(os.environ.get('SIGNAL_VIEWER_PORT', '8050'))
 DEBUG = os.environ.get('SIGNAL_VIEWER_DEBUG', 'true').lower() == 'true'
 
+# Verbose mode: when True, log detailed tracebacks for every error to the CLI
+VERBOSE = os.environ.get('SIGNAL_VIEWER_VERBOSE', 'false').lower() == 'true'
+
 # Cache
 CACHE_MAX_MEMORY_MB = int(os.environ.get('SIGNAL_VIEWER_CACHE_MB', '500'))
 CACHE_MAX_MEMORY_BYTES = CACHE_MAX_MEMORY_MB * 1024 * 1024
@@ -51,6 +54,7 @@ class HDF5Schema:
     """
 
     # -- Filesystem conventions -----------------------------------------------
+    SERIAL_PREFIX  = 'SN'            # only serial dirs starting with this prefix
     FOLDER1_REGEX  = r'p(\d{3})_.+'  # regex for folder_1 (e.g. p001_motor)
     FILE_EXTENSION = '*.h5'          # glob pattern for HDF5 files
     FILE_SUFFIX    = '.h5'           # file suffix for generated files

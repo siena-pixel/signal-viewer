@@ -430,7 +430,17 @@ const GlobalNav = {
 
     const names = meta.signal_names || [];
     const units = meta.units || [];
-    for (let i = 0; i < (meta.signal_count || names.length); i++) {
+    const count = meta.signal_count || names.length;
+
+    // Build index array and sort alphabetically by signal name
+    const sorted = Array.from({ length: count }, (_, i) => i)
+      .sort((a, b) => {
+        const na = (names[a] || '').toLowerCase();
+        const nb = (names[b] || '').toLowerCase();
+        return na < nb ? -1 : na > nb ? 1 : 0;
+      });
+
+    for (const i of sorted) {
       const name = names[i] || `signal_${String(i).padStart(3, '0')}`;
       const unit = units[i] || '';
 

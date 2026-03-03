@@ -196,6 +196,8 @@ class PageHandler(BaseHandler):
             self.set_header("Content-Type", "text/html")
             self.write(html)
         except Exception as e:
+            if config.VERBOSE:
+                logger.error(f"Error in PageHandler: {e}\n{traceback.format_exc()}")
             self.set_status(500)
             self.write_json({"error": f"Template error: {e}"})
 
@@ -213,7 +215,10 @@ class SerialsHandler(BaseHandler):
             serials = self.application.metadata_index.get_serial_numbers()
             self.write_json({"serials": serials})
         except Exception as e:
-            logger.error(f"Error in SerialsHandler: {e}")
+            if config.VERBOSE:
+                logger.error(f"Error in SerialsHandler: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in SerialsHandler: {e}")
             raise tornado.web.HTTPError(500, str(e))
 
 
@@ -236,7 +241,10 @@ class StepsHandler(BaseHandler):
         except ValueError as e:
             raise tornado.web.HTTPError(404, str(e))
         except Exception as e:
-            logger.error(f"Error in StepsHandler: {e}")
+            if config.VERBOSE:
+                logger.error(f"Error in StepsHandler: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in StepsHandler: {e}")
             raise tornado.web.HTTPError(500, str(e))
 
 
@@ -262,7 +270,10 @@ class FilesHandler(BaseHandler):
         except ValueError as e:
             raise tornado.web.HTTPError(404, str(e))
         except Exception as e:
-            logger.error(f"Error in FilesHandler: {e}")
+            if config.VERBOSE:
+                logger.error(f"Error in FilesHandler: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in FilesHandler: {e}")
             raise tornado.web.HTTPError(500, str(e))
 
 
@@ -287,7 +298,10 @@ class BatchesHandler(BaseHandler):
         except ValueError as e:
             raise tornado.web.HTTPError(400, str(e))
         except Exception as e:
-            logger.error(f"Error in BatchesHandler: {e}")
+            if config.VERBOSE:
+                logger.error(f"Error in BatchesHandler: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in BatchesHandler: {e}")
             raise tornado.web.HTTPError(500, str(e))
 
 
@@ -313,7 +327,10 @@ class BatchMetaHandler(BaseHandler):
         except ValueError as e:
             raise tornado.web.HTTPError(404, str(e))
         except Exception as e:
-            logger.error(f"Error in BatchMetaHandler: {e}")
+            if config.VERBOSE:
+                logger.error(f"Error in BatchMetaHandler: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in BatchMetaHandler: {e}")
             raise tornado.web.HTTPError(500, str(e))
 
 
@@ -384,7 +401,10 @@ class SignalHandler(BaseHandler):
         except (ValueError, IndexError) as e:
             raise tornado.web.HTTPError(404, str(e))
         except Exception as e:
-            logger.error(f"Error in SignalHandler: {e}")
+            if config.VERBOSE:
+                logger.error(f"Error in SignalHandler: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in SignalHandler: {e}")
             raise tornado.web.HTTPError(500, str(e))
 
 
@@ -440,7 +460,10 @@ class StatsHandler(BaseHandler):
         except tornado.web.HTTPError:
             raise
         except Exception as e:
-            logger.error(f"Error in StatsHandler: {e}")
+            if config.VERBOSE:
+                logger.error(f"Error in StatsHandler: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in StatsHandler: {e}")
             raise tornado.web.HTTPError(500, str(e))
 
 
@@ -502,7 +525,10 @@ class CorrelationHandler(BaseHandler):
         except tornado.web.HTTPError:
             raise
         except Exception as e:
-            logger.error(f"Error in CorrelationHandler: {e}")
+            if config.VERBOSE:
+                logger.error(f"Error in CorrelationHandler: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in CorrelationHandler: {e}")
             raise tornado.web.HTTPError(500, str(e))
 
 
@@ -550,7 +576,10 @@ class TrendHandler(BaseHandler):
         except tornado.web.HTTPError:
             raise
         except Exception as e:
-            logger.error(f"Error in TrendHandler: {e}")
+            if config.VERBOSE:
+                logger.error(f"Error in TrendHandler: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in TrendHandler: {e}")
             raise tornado.web.HTTPError(500, str(e))
 
 
@@ -563,7 +592,10 @@ class CacheStatsHandler(BaseHandler):
             stats = self.application.signal_cache.stats()
             self.write_json(stats)
         except Exception as e:
-            logger.error(f"Error in CacheStatsHandler: {e}")
+            if config.VERBOSE:
+                logger.error(f"Error in CacheStatsHandler: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in CacheStatsHandler: {e}")
             raise tornado.web.HTTPError(500, str(e))
 
 
@@ -600,5 +632,8 @@ class RescanHandler(BaseHandler):
         except tornado.web.HTTPError:
             raise
         except Exception as e:
-            logger.error(f"Error in RescanHandler: {e}")
+            if config.VERBOSE:
+                logger.error(f"Error in RescanHandler: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in RescanHandler: {e}")
             raise tornado.web.HTTPError(500, str(e))

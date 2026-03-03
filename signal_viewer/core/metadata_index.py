@@ -78,6 +78,11 @@ class MetadataIndex:
                     continue
 
                 serial_name = serial_dir.name
+
+                # Only include serials matching the configured prefix
+                if S.SERIAL_PREFIX and not serial_name.startswith(S.SERIAL_PREFIX):
+                    continue
+
                 new_index[serial_name] = {}
 
                 # Iterate through folder_1 directories (pXXX_label)
