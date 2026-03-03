@@ -11,6 +11,7 @@ import base64
 import json
 import logging
 import traceback
+from pathlib import Path
 from typing import Optional
 
 import numpy as np
@@ -21,10 +22,7 @@ from signal_viewer import config
 from signal_viewer.core.hdf5_reader import HDF5Reader
 from signal_viewer.processing import (
     resampling,
-    spectral,
-    filtering,
     statistics,
-    anomaly,
     correlation,
     trend,
 )
@@ -109,7 +107,7 @@ class BaseHandler(tornado.web.RequestHandler):
 
     def decode_file_path(self, encoded_path: str) -> str:
         """
-        Decode base64-encoded file path from URL.
+        Decode base64-encoded file path from URL and validate it stays within DATA_ROOT.
 
         Args:
             encoded_path: Base64-encoded file path
@@ -118,13 +116,21 @@ class BaseHandler(tornado.web.RequestHandler):
             Decoded file path
 
         Raises:
-            ValueError: If decoding fails
+            ValueError: If decoding fails or path is outside DATA_ROOT
         """
         try:
             # Re-add padding stripped by JS encodePath
             padded = encoded_path + "=" * (-len(encoded_path) % 4)
             decoded = base64.urlsafe_b64decode(padded)
-            return decoded.decode("utf-8")
+            path = decoded.decode("utf-8")
+
+            # Validate path stays within DATA_ROOT
+            resolved = Path(path).resolve()
+            data_root = Path(config.DATA_ROOT).resolve()
+            if not str(resolved).startswith(str(data_root) + "/") and resolved != data_root:
+                raise ValueError("Path outside data root")
+
+            return path
         except Exception as e:
             raise ValueError(f"Failed to decode file path: {e}")
 
@@ -212,14 +218,14 @@ class SerialsHandler(BaseHandler):
 
 
 class StepsHandler(BaseHandler):
-    """GET /api/serials/{serial_num}/steps → List steps for a serial number."""
+    """GET /api/serials/{serial_num}/steps → List folder_2 names for a folder_1."""
 
     def get(self, serial_num: str):
         """
-        Get steps for a serial number.
+        Get steps (folder_2 names) for a serial number (folder_1).
 
         Args:
-            serial_num: Serial number identifier
+            serial_num: folder_1 identifier (e.g., "p001_motor_test")
         """
         try:
             if self.application.metadata_index is None:
@@ -239,19 +245,18 @@ class FilesHandler(BaseHandler):
 
     def get(self, serial_num: str, step: str):
         """
-        Get files for a serial number and step.
+        Get files for a folder_1 and folder_2.
 
         Args:
-            serial_num: Serial number identifier
-            step: Step number (as string)
+            serial_num: folder_1 identifier
+            step: folder_2 name (string)
         """
         try:
             if self.application.metadata_index is None:
                 raise tornado.web.HTTPError(503, "Index not initialized")
 
-            step_int = int(step)
             files = self.application.metadata_index.get_files(
-                serial_num, step_int
+                serial_num, step
             )
             self.write_json({"files": files})
         except ValueError as e:
@@ -262,11 +267,11 @@ class FilesHandler(BaseHandler):
 
 
 class BatchesHandler(BaseHandler):
-    """GET /api/files/{encoded_path}/batches → List batches in a file."""
+    """GET /api/files/{encoded_path}/batches → List configured groups in a file."""
 
     def get(self, encoded_path: str):
         """
-        Get batches in an HDF5 file.
+        Get configured HDF5 groups present in the file.
 
         Args:
             encoded_path: Base64-encoded file path
@@ -275,10 +280,12 @@ class BatchesHandler(BaseHandler):
             file_path = self.decode_file_path(encoded_path)
             reader = self.get_hdf5_reader(file_path)
 
-            batches = reader.get_batches()
+            batches = reader.get_groups()
             self.write_json({"batches": batches})
         except tornado.web.HTTPError:
             raise
+        except ValueError as e:
+            raise tornado.web.HTTPError(400, str(e))
         except Exception as e:
             logger.error(f"Error in BatchesHandler: {e}")
             raise tornado.web.HTTPError(500, str(e))
@@ -381,251 +388,6 @@ class SignalHandler(BaseHandler):
             raise tornado.web.HTTPError(500, str(e))
 
 
-class FFTHandler(BaseHandler):
-    """POST /api/analysis/fft → Compute FFT."""
-
-    def post(self):
-        """
-        Compute FFT of a signal.
-
-        Request body:
-        {
-          "file_path": "/path/to/file.h5",
-          "batch": "batch_001",
-          "signal_idx": 0,
-          "sampling_rate": 1000.0
-        }
-        """
-        try:
-            data = json.loads(self.request.body)
-            file_path = data.get("file_path")
-            batch = data.get("batch")
-            signal_idx = int(data.get("signal_idx", 0))
-            sampling_rate = float(data.get("sampling_rate", 1000.0))
-
-            if not file_path or not batch:
-                raise tornado.web.HTTPError(400, "Missing required fields")
-
-            reader = self.get_hdf5_reader(file_path)
-            time, signal = reader.load_signal(batch, signal_idx)
-
-            # Compute FFT
-            frequencies, magnitude_db = spectral.compute_fft(
-                signal, sampling_rate
-            )
-
-            self.write_json(
-                {
-                    "frequencies": frequencies,
-                    "magnitude": magnitude_db,
-                }
-            )
-        except tornado.web.HTTPError:
-            raise
-        except Exception as e:
-            logger.error(f"Error in FFTHandler: {e}")
-            raise tornado.web.HTTPError(500, str(e))
-
-
-class PSDHandler(BaseHandler):
-    """POST /api/analysis/psd → Compute Power Spectral Density."""
-
-    def post(self):
-        """
-        Compute PSD using Welch's method.
-
-        Request body:
-        {
-          "file_path": "/path/to/file.h5",
-          "batch": "batch_001",
-          "signal_idx": 0,
-          "sampling_rate": 1000.0,
-          "nperseg": 1024,
-          "window": "hann"
-        }
-        """
-        try:
-            data = json.loads(self.request.body)
-            file_path = data.get("file_path")
-            batch = data.get("batch")
-            signal_idx = int(data.get("signal_idx", 0))
-            sampling_rate = float(data.get("sampling_rate", 1000.0))
-            nperseg = int(data.get("nperseg", 1024))
-            window = data.get("window", config.DEFAULT_FFT_WINDOW)
-
-            if not file_path or not batch:
-                raise tornado.web.HTTPError(400, "Missing required fields")
-
-            reader = self.get_hdf5_reader(file_path)
-            time, signal = reader.load_signal(batch, signal_idx)
-
-            # Compute PSD
-            frequencies, psd = spectral.compute_psd_welch(
-                signal, sampling_rate, nperseg=nperseg, window=window
-            )
-
-            # Find dominant frequencies
-            peaks = spectral.find_dominant_frequencies(frequencies, psd, n_peaks=5)
-
-            self.write_json(
-                {
-                    "frequencies": frequencies,
-                    "psd": psd,
-                    "dominant_peaks": peaks,
-                }
-            )
-        except tornado.web.HTTPError:
-            raise
-        except Exception as e:
-            logger.error(f"Error in PSDHandler: {e}")
-            raise tornado.web.HTTPError(500, str(e))
-
-
-class FilterHandler(BaseHandler):
-    """POST /api/analysis/filter → Apply digital filter."""
-
-    def post(self):
-        """
-        Apply Butterworth filter to a signal.
-
-        Request body:
-        {
-          "file_path": "/path/to/file.h5",
-          "batch": "batch_001",
-          "signal_idx": 0,
-          "type": "lowpass",
-          "cutoff": 100.0,
-          "low_cutoff": 50.0,
-          "high_cutoff": 200.0,
-          "sampling_rate": 1000.0,
-          "order": 4
-        }
-
-        filter_type options: "lowpass", "highpass", "bandpass"
-        """
-        try:
-            data = json.loads(self.request.body)
-            file_path = data.get("file_path")
-            batch = data.get("batch")
-            signal_idx = int(data.get("signal_idx", 0))
-            filter_type = data.get("type", "lowpass")
-            sampling_rate = float(data.get("sampling_rate", 1000.0))
-            order = int(data.get("order", config.DEFAULT_FILTER_ORDER))
-
-            if not file_path or not batch:
-                raise tornado.web.HTTPError(400, "Missing required fields")
-
-            reader = self.get_hdf5_reader(file_path)
-            time, signal = reader.load_signal(batch, signal_idx)
-
-            # Apply filter based on type
-            if filter_type == "lowpass":
-                cutoff = data.get("cutoff")
-                if cutoff is None:
-                    raise tornado.web.HTTPError(400, "Missing 'cutoff' parameter for lowpass filter")
-                filtered = filtering.butterworth_lowpass(
-                    signal, sampling_rate, float(cutoff), order
-                )
-            elif filter_type == "highpass":
-                cutoff = data.get("cutoff")
-                if cutoff is None:
-                    raise tornado.web.HTTPError(400, "Missing 'cutoff' parameter for highpass filter")
-                filtered = filtering.butterworth_highpass(
-                    signal, sampling_rate, float(cutoff), order
-                )
-            elif filter_type == "bandpass":
-                low_cutoff = data.get("low_cutoff")
-                high_cutoff = data.get("high_cutoff")
-                if low_cutoff is None or high_cutoff is None:
-                    raise tornado.web.HTTPError(400, "Missing 'low_cutoff' or 'high_cutoff' parameter for bandpass filter")
-                filtered = filtering.butterworth_bandpass(
-                    signal, sampling_rate, float(low_cutoff), float(high_cutoff), order
-                )
-            else:
-                raise tornado.web.HTTPError(400, f"Unknown filter type: {filter_type}")
-
-            self.write_json(
-                {
-                    "time": time,
-                    "filtered": filtered,
-                    "original": signal,
-                    "filter_type": filter_type,
-                }
-            )
-        except tornado.web.HTTPError:
-            raise
-        except Exception as e:
-            logger.error(f"Error in FilterHandler: {e}")
-            raise tornado.web.HTTPError(500, str(e))
-
-
-class AnomalyHandler(BaseHandler):
-    """POST /api/analysis/anomaly → Detect anomalies."""
-
-    def post(self):
-        """
-        Detect anomalies in a signal.
-
-        Request body:
-        {
-          "file_path": "/path/to/file.h5",
-          "batch": "batch_001",
-          "signal_idx": 0,
-          "method": "zscore",
-          "threshold": 3.0
-        }
-
-        method options: "zscore", "mad", "derivative", "iqr", "rolling"
-        """
-        try:
-            data = json.loads(self.request.body)
-            file_path = data.get("file_path")
-            batch = data.get("batch")
-            signal_idx = int(data.get("signal_idx", 0))
-            method = data.get("method", "zscore")
-            threshold = float(data.get("threshold", 3.0))
-
-            if not file_path or not batch:
-                raise tornado.web.HTTPError(400, "Missing required fields")
-
-            reader = self.get_hdf5_reader(file_path)
-            time, signal = reader.load_signal(batch, signal_idx)
-
-            # Detect anomalies based on method
-            if method == "zscore":
-                anomaly_indices, scores = anomaly.zscore_anomaly(
-                    signal, threshold
-                )
-            elif method == "mad":
-                anomaly_indices, scores = anomaly.mad_anomaly(signal, threshold)
-            elif method == "derivative":
-                anomaly_indices, scores = anomaly.derivative_anomaly(
-                    signal, threshold
-                )
-            elif method == "iqr":
-                anomaly_indices, scores = anomaly.iqr_anomaly(
-                    signal, threshold
-                )
-            elif method == "rolling":
-                window_size = int(data.get("window_size", 100))
-                anomaly_indices, scores = anomaly.rolling_anomaly(
-                    signal, window_size, threshold
-                )
-            else:
-                raise tornado.web.HTTPError(400, f"Unknown method: {method}")
-
-            self.write_json(
-                {
-                    "anomaly_indices": anomaly_indices,
-                    "scores": scores,
-                    "count": len(anomaly_indices),
-                }
-            )
-        except tornado.web.HTTPError:
-            raise
-        except Exception as e:
-            logger.error(f"Error in AnomalyHandler: {e}")
-            raise tornado.web.HTTPError(500, str(e))
 
 
 class StatsHandler(BaseHandler):
@@ -655,6 +417,9 @@ class StatsHandler(BaseHandler):
 
             if not file_path or not batch:
                 raise tornado.web.HTTPError(400, "Missing required fields")
+
+            if rainflow_bins < 1:
+                raise tornado.web.HTTPError(400, "rainflow_bins must be >= 1")
 
             reader = self.get_hdf5_reader(file_path)
             time, signal = reader.load_signal(batch, signal_idx)

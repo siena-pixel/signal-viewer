@@ -9,27 +9,26 @@ A professional web-based tool for exploring, visualizing, and analyzing time-ser
 │ Serials: [SN001] [SN002] [SN003]                            │
 ├─────────────────────────────────────────────────────────────┤
 │                                                               │
-│  Signal Plot            │ Statistics  │ FFT Analysis         │
-│  ┌──────────────────┐   │ Mean: 5.2   │ Freq: 0-500 Hz       │
-│  │ ╱╲╱╲  ╱╲╱╲       │   │ Std:  1.1   │ Peak: 120 Hz         │
-│  │╱  ╲╱  ╲╱  ╲      │   │ Min:  2.3   │ Mag:  45 dB          │
-│  │                  │   │ Max:  8.1   │                      │
-│  │ Filters │ Trends │   │ Median: 5.0 │ Anomalies: 3 detected
-│  │ Lowpass │ Poly-1 │   │             │                      │
-│  └──────────────────┘   │ Correlation │ Analysis Tools       │
-│                         │ Cross-corr  │ Welch PSD, Trends    │
-│                                       │ IIR Filtering        │
+│  Signal Plot            │ Statistics  │ Trend Analysis       │
+│  ┌──────────────────┐   │ Mean: 5.2   │ Degree 1: 5.1x+0.2   │
+│  │ ╱╲╱╲  ╱╲╱╲       │   │ Std:  1.1   │ Fit quality: 0.94     │
+│  │╱  ╲╱  ╲╱  ╲      │   │ Min:  2.3   │                      │
+│  │                  │   │ Max:  8.1   │ Correlation          │
+│  │ Trends│ Corr    │   │ Median: 5.0 │ Cross-correlation    │
+│  │ Poly-1│ Cross   │   │             │ Max lag: 42 samples  │
+│  └──────────────────┘   │ RMS Trend   │ Analysis Tools       │
+│                         │ Windows: 5  │ Rainflow cycles      │
+│                                       │ Envelope estimation  │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ## Features
 
-- **Data Explorer**: Browse hierarchical HDF5 structure (Serial Number → Step → Files)
+- **Data Explorer**: Browse hierarchical HDF5 structure (Serial → Step → Files)
 - **Signal Viewer**: Interactive time-series plots with zoom, pan, and downsampling
-- **Spectral Analysis**: FFT and Power Spectral Density (Welch's method)
-- **Filtering**: Butterworth lowpass, highpass, and bandpass filters
-- **Anomaly Detection**: Multiple methods (Z-score, MAD, IQR, rolling window)
-- **Statistical Insights**: Descriptive stats, trends, cross-correlation
+- **Statistical Insights**: Descriptive stats, rolling statistics, rainflow cycle counting
+- **Trend Analysis**: Polynomial fitting, envelope estimation, RMS trends
+- **Correlation**: Cross-correlation and coherence analysis
 - **Performance**: Efficient caching and LTTB downsampling for large datasets
 - **Responsive UI**: Works on desktop and tablets
 - **CORS-Enabled API**: RESTful endpoints for integration with external tools
@@ -68,11 +67,17 @@ Or place your own HDF5 data inside `data/`:
 03_hdf5_signal_viewer/
 ├── data/
 │   ├── SN001/
-│   │   ├── step_1/
-│   │   │   └── SN001_2024-01-15_abc123.h5
-│   │   ├── step_2/ ...
+│   │   ├── p001_motor_test/
+│   │   │   ├── run_nominal/
+│   │   │   │   └── data.h5
+│   │   │   ├── run_overload/ ...
 │   ├── SN002/ ...
 ```
+
+The folder structure is: `root / serial / folder_1 / folder_2 / file.h5`
+- `serial`: Top-level serial number directory (e.g., SN001, SN002)
+- `folder_1`: Test identifier matching pattern `p\d{3}_.*` (e.g., p001_motor_test)
+- `folder_2`: Any subfolder name (e.g., run_nominal, warmup)
 
 Override the data location with an environment variable if your data lives elsewhere:
 
@@ -95,22 +100,28 @@ Visit: http://127.0.0.1:8050
 
 ### HDF5 File Structure
 
-Each `.h5` file must contain one or more batches with the following structure:
+Each `.h5` file must contain one or more groups with the following structure:
 
 ```
 file.h5
-├── batch_001
-│   ├── time (1D array, float64): Time coordinates [N]
-│   ├── corrected_positions (1D array, float64): Corrected time values [N]
-│   ├── value (2D array, float64): Signal data [M, N]
+├── GROUP_T0
+│   ├── GROUP_T0_T (1D array, float64): Time coordinates [N]
+│   ├── GROUP_T0_P (1D array, float64): Corrected time values [N]
+│   ├── GROUP_T0_V (2D array, float64): Signal data [M, N]
 │   │   - M: number of signals
 │   │   - N: number of samples per signal
-│   ├── name (1D array, string): Signal names [M]
-│   ├── units (1D array, string): Signal units [M]
-│   └── other_attributes (optional): Additional metadata
-├── batch_002
+│   ├── GROUP_T0_N (1D array, string): Signal names [M]
+│   ├── GROUP_T0_U (1D array, string): Signal units [M]
+├── GROUP_T1
 │   └── ...
 ```
+
+Dataset names are built as: `GROUP_NAME + suffix`
+- `_V`: Values (signals)
+- `_T`: Time coordinates
+- `_P`: Positions (corrected time)
+- `_N`: Signal names
+- `_U`: Signal units
 
 ### Example with h5py
 
@@ -119,18 +130,18 @@ import h5py
 import numpy as np
 
 with h5py.File('data.h5', 'w') as f:
-    grp = f.create_group('batch_001')
+    grp = f.create_group('GROUP_T0')
 
     # Create datasets
     t = np.linspace(0, 10, 1000)
     signals = np.random.randn(4, 1000)
 
-    grp.create_dataset('time', data=t)
-    grp.create_dataset('corrected_positions', data=t)
-    grp.create_dataset('value', data=signals)
-    grp.create_dataset('name',
+    grp.create_dataset('GROUP_T0_T', data=t)
+    grp.create_dataset('GROUP_T0_P', data=t)
+    grp.create_dataset('GROUP_T0_V', data=signals)
+    grp.create_dataset('GROUP_T0_N',
         data=np.array(['position', 'velocity', 'current', 'voltage']))
-    grp.create_dataset('units',
+    grp.create_dataset('GROUP_T0_U',
         data=np.array(['m', 'm/s', 'A', 'V']))
 ```
 
@@ -158,12 +169,9 @@ signal_viewer/
 │   ├── metadata_index.py  # Filesystem scanning
 │   └── signal_cache.py    # In-memory caching
 ├── processing/         # Signal analysis algorithms
-│   ├── spectral.py     # FFT, PSD
-│   ├── filtering.py    # Butterworth filters
-│   ├── anomaly.py      # Anomaly detection
-│   ├── statistics.py   # Descriptive stats
-│   ├── correlation.py  # Cross-correlation
-│   ├── trend.py        # Polynomial fitting
+│   ├── statistics.py   # Descriptive stats, rainflow
+│   ├── correlation.py  # Cross-correlation, coherence
+│   ├── trend.py        # Polynomial fitting, envelopes
 │   └── resampling.py   # LTTB downsampling
 ├── templates/          # Jinja2 HTML templates
 └── visualization/      # Client-side plotting (JavaScript)
@@ -175,16 +183,16 @@ signal_viewer/
 
 ```
 GET /api/serials                          # List serial numbers
-GET /api/serials/{serial}/steps           # List steps for serial
-GET /api/serials/{serial}/steps/{n}/files # List files in step
-GET /api/files/{encoded_path}/batches     # List batches in file
-GET /api/files/{encoded_path}/batches/{batch}/meta  # Batch metadata
+GET /api/serials/{serial}/steps           # List steps (folder_1) for serial
+GET /api/serials/{serial}/steps/{step}/files # List files in step
+GET /api/files/{encoded_path}/batches     # List groups in file
+GET /api/files/{encoded_path}/batches/{group}/meta  # Group metadata
 ```
 
 ### Signal Loading
 
 ```
-GET /api/files/{encoded_path}/batches/{batch}/signals/{idx}?downsample=2000
+GET /api/files/{encoded_path}/batches/{group}/signals/{idx}?downsample=2000
 ```
 
 Returns: `{time, values, name, units, samples}`
@@ -192,11 +200,7 @@ Returns: `{time, values, name, units, samples}`
 ### Analysis Endpoints (POST)
 
 ```
-POST /api/analysis/fft         # Fourier Transform
-POST /api/analysis/psd         # Power Spectral Density
-POST /api/analysis/filter      # Digital filtering
-POST /api/analysis/anomaly     # Anomaly detection
-POST /api/analysis/stats       # Signal statistics
+POST /api/analysis/stats       # Signal statistics, rainflow cycles
 POST /api/analysis/trend       # Polynomial trend fitting
 POST /api/analysis/correlation # Cross-correlation
 ```
@@ -245,12 +249,12 @@ tests/
 
 ## Requirements
 
-- Python 3.8+
+- Python 3.9+
 - tornado (async web server)
 - numpy (numerical computing)
-- scipy (signal processing)
-- h5py (HDF5 file access, optional but recommended)
+- h5py (HDF5 file access)
 - jinja2 (HTML templating)
+- plotly (visualization)
 
 See `requirements.txt` for exact versions.
 
@@ -259,7 +263,7 @@ See `requirements.txt` for exact versions.
 1. **Caching**: Configure `SIGNAL_VIEWER_CACHE_MB` based on available RAM
 2. **Downsampling**: Use `?downsample=N` parameter for large signals (>100k samples)
 3. **Batch Loading**: Process data in batches rather than loading entire files
-4. **Filtering**: Apply filters server-side before visualization
+4. **Analysis**: Use correlation and trend analysis server-side before visualization
 
 ## License
 

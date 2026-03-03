@@ -21,8 +21,6 @@ CACHE_MAX_MEMORY_BYTES = CACHE_MAX_MEMORY_MB * 1024 * 1024
 # Processing defaults
 DEFAULT_DOWNSAMPLE_POINTS = 2000
 MAX_DOWNSAMPLE_POINTS = 10000
-DEFAULT_FFT_WINDOW = 'hann'
-DEFAULT_FILTER_ORDER = 4
 
 # UI
 APP_TITLE = 'Engineering Signal Viewer & Analyzer'
@@ -37,21 +35,40 @@ class HDF5Schema:
     """
     Defines the HDF5 file structure: dataset names, directory conventions,
     and naming patterns.  Every module that touches HDF5 data imports from here.
+
+    Folder layout:  root / serial / folder_1 / folder_2 / file.h5
+      - serial:   top-level serial number directory (e.g. SN001, SN002)
+      - folder_1: pXXX_label  (e.g. p001_motor_test)
+      - folder_2: any subfolder name (e.g. run_nominal, warmup)
+
+    HDF5 internal layout:
+      /GROUP_NAME/
+          GROUP_NAME_V   float64 [num_signals, num_samples]  (values)
+          GROUP_NAME_T   float64 [num_samples]               (time)
+          GROUP_NAME_P   float64 [num_samples]               (positions)
+          GROUP_NAME_N   str     [num_signals]               (signal names)
+          GROUP_NAME_U   str     [num_signals]               (units)
     """
 
-    # -- Dataset names inside each batch group --------------------------------
-    VALUES   = 'value'               # float64 matrix [num_signals, num_samples]
-    TIME     = 'time'                # float64 array  [num_samples]
-    POSITIONS = 'corrected_positions' # float64 array  [num_samples]
-    UNITS    = 'units'               # string array   [num_signals]
-    NAMES    = 'name'                # string array   [num_signals]
-
     # -- Filesystem conventions -----------------------------------------------
-    STEP_PREFIX    = 'step_'         # directory prefix, e.g. "step_1", "step_2"
-    STEP_REGEX     = r'step_(\d+)'   # regex to extract the step number
+    FOLDER1_REGEX  = r'p(\d{3})_.+'  # regex for folder_1 (e.g. p001_motor)
     FILE_EXTENSION = '*.h5'          # glob pattern for HDF5 files
     FILE_SUFFIX    = '.h5'           # file suffix for generated files
 
-    # -- Batch naming ---------------------------------------------------------
-    BATCH_FORMAT   = 'batch_{:03d}'  # Python format string for batch groups
-    DEFAULT_BATCH  = 'batch_001'     # default batch name for tests / mocks
+    # -- HDF5 groups of interest ----------------------------------------------
+    GROUP_NAMES = ['GROUP_T0', 'GROUP_T1']  # top-level groups to read
+
+    # -- Dataset suffix convention (appended to group name) -------------------
+    VALUE_SUFFIX    = '_V'           # float64 matrix [num_signals, num_samples]
+    TIME_SUFFIX     = '_T'           # float64 array  [num_samples]
+    POSITION_SUFFIX = '_P'           # float64 array  [num_samples]
+    NAMES_SUFFIX    = '_N'           # string array   [num_signals]
+    UNITS_SUFFIX    = '_U'           # string array   [num_signals]
+
+    # -- Default group for tests / mocks --------------------------------------
+    DEFAULT_GROUP   = 'GROUP_T0'
+
+    @classmethod
+    def ds(cls, group: str, suffix: str) -> str:
+        """Build a dataset name: GROUP_NAME + suffix."""
+        return group + suffix

@@ -29,12 +29,12 @@ def cross_correlate(
     a_clean = np.where(np.isnan(signal_a), 0.0, signal_a)
     b_clean = np.where(np.isnan(signal_b), 0.0, signal_b)
 
-    # Use numpy's correlate for accurate cross-correlation
-    correlation_full = np.correlate(a_clean, b_clean, mode="full")
-
-    # Normalize by signal lengths and standard deviations
+    # Zero-mean the signals before correlation for proper normalization
     a_norm = a_clean - np.mean(a_clean)
     b_norm = b_clean - np.mean(b_clean)
+
+    # Use numpy's correlate for accurate cross-correlation
+    correlation_full = np.correlate(a_norm, b_norm, mode="full")
 
     a_std = np.std(a_norm)
     b_std = np.std(b_norm)
@@ -73,54 +73,40 @@ def compute_coherence(
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Compute magnitude-squared coherence between two signals.
-    
+
     Coherence = |Pxy|^2 / (Pxx * Pyy)
-    where Pxy is cross-spectral density and Pxx, Pyy are auto-spectral densities.
-    
-    Uses Welch's method for PSD estimation.
-    
+
     Args:
         signal_a: First signal array.
         signal_b: Second signal array.
         sampling_rate: Sampling frequency in Hz.
         nperseg: Length of each segment for Welch method (default: 1024).
-    
+
     Returns:
         Tuple of (frequencies, coherence) arrays.
-        frequencies: Frequency values in Hz.
-        coherence: Magnitude-squared coherence in [0, 1].
     """
     if len(signal_a) == 0 or len(signal_b) == 0:
         return np.array([]), np.array([])
-    
-    from .spectral import compute_psd_welch
-    
+
     a_clean = np.where(np.isnan(signal_a), 0.0, signal_a)
     b_clean = np.where(np.isnan(signal_b), 0.0, signal_b)
-    
-    # Compute auto-spectral densities
-    freq_a, psd_a = compute_psd_welch(a_clean, sampling_rate, nperseg=nperseg)
-    freq_b, psd_b = compute_psd_welch(b_clean, sampling_rate, nperseg=nperseg)
-    
-    # Ensure same frequency grid
-    frequencies = freq_a
-    psd_a = 10.0 ** (psd_a / 10.0)  # Convert from dB back to linear
-    psd_b = 10.0 ** (psd_b / 10.0)
-    
-    # Compute cross-spectral density using Welch's method
+
+    # Compute using Welch's method
     noverlap = nperseg // 2
     step = nperseg - noverlap
-    n_segments = (len(a_clean) - noverlap) // step
-    
+    n_segments = max(1, (len(a_clean) - noverlap) // step)
+
     if n_segments < 1:
         n_segments = 1
-        step = len(a_clean)
-    
-    csd_vals = []
+
+    psd_a_acc = None
+    psd_b_acc = None
+    csd_acc = None
+
     for i in range(n_segments):
         start = i * step
         end = min(start + nperseg, len(a_clean))
-        
+
         if end - start < nperseg:
             seg_a = np.zeros(nperseg)
             seg_b = np.zeros(nperseg)
@@ -129,24 +115,38 @@ def compute_coherence(
         else:
             seg_a = a_clean[start:end]
             seg_b = b_clean[start:end]
-        
+
         win = np.hanning(nperseg)
         seg_a = seg_a * win
         seg_b = seg_b * win
-        
+
         fft_a = np.fft.rfft(seg_a)
         fft_b = np.fft.rfft(seg_b)
-        csd_segment = fft_a * np.conj(fft_b)
-        csd_vals.append(csd_segment)
-    
-    csd = np.mean(csd_vals, axis=0)
-    csd_mag_sq = np.abs(csd) ** 2
-    
-    # Coherence = |Cxy|^2 / (Cxx * Cyy)
-    coherence = csd_mag_sq / (psd_a * psd_b + 1e-10)
-    coherence = np.minimum(coherence, 1.0)
-    coherence = np.maximum(coherence, 0.0)
-    
+
+        psd_a_seg = np.abs(fft_a) ** 2
+        psd_b_seg = np.abs(fft_b) ** 2
+        csd_seg = fft_a * np.conj(fft_b)
+
+        if psd_a_acc is None:
+            psd_a_acc = psd_a_seg
+            psd_b_acc = psd_b_seg
+            csd_acc = csd_seg
+        else:
+            psd_a_acc += psd_a_seg
+            psd_b_acc += psd_b_seg
+            csd_acc += csd_seg
+
+    # Average
+    psd_a_acc /= n_segments
+    psd_b_acc /= n_segments
+    csd_acc /= n_segments
+
+    # Coherence
+    coherence = np.abs(csd_acc) ** 2 / (psd_a_acc * psd_b_acc + 1e-10)
+    coherence = np.clip(coherence, 0.0, 1.0)
+
+    frequencies = np.fft.rfftfreq(nperseg, d=1.0 / sampling_rate)
+
     return frequencies, coherence
 
 

@@ -1,5 +1,6 @@
 """Trend analysis and changepoint detection for time series data."""
 
+import logging
 from typing import Tuple
 import numpy as np
 
@@ -26,7 +27,12 @@ def fit_polynomial(
     
     if len(time) != len(signal):
         raise ValueError("time and signal must have the same length")
-    
+
+    nan_count = int(np.sum(np.isnan(signal)))
+    if nan_count > 0:
+        logging.getLogger(__name__).warning(
+            f"fit_polynomial: replaced {nan_count} NaN values with 0"
+        )
     signal_clean = np.where(np.isnan(signal), 0.0, signal)
     
     # Fit polynomial
@@ -77,7 +83,12 @@ def detect_changepoints(
     """
     if len(signal) < window_size:
         return np.array([], dtype=np.int64)
-    
+
+    nan_count = int(np.sum(np.isnan(signal)))
+    if nan_count > 0:
+        logging.getLogger(__name__).warning(
+            f"detect_changepoints: replaced {nan_count} NaN values with 0"
+        )
     signal_clean = np.where(np.isnan(signal), 0.0, signal)
     half_win = window_size // 2
     
@@ -184,7 +195,12 @@ def compute_rms_trend(signal: np.ndarray, window_size: int = 1000) -> np.ndarray
     """
     if len(signal) == 0:
         return np.array([])
-    
+
+    nan_count = int(np.sum(np.isnan(signal)))
+    if nan_count > 0:
+        logging.getLogger(__name__).warning(
+            f"compute_rms_trend: replaced {nan_count} NaN values with 0"
+        )
     signal_clean = np.where(np.isnan(signal), 0.0, signal)
     
     if len(signal_clean) < window_size:

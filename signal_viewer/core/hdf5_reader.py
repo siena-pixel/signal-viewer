@@ -5,12 +5,15 @@ Provides robust HDF5 file reading with lazy loading, caching support, and
 comprehensive metadata handling. Includes a MockHDF5File class for testing
 without h5py dependency.
 
-Data Structure (per batch group):
-  - value: float64 matrix [num_signals, num_samples]
-  - time: float64 array [num_signals] or [num_samples]
-  - corrected_positions: float64 array (same shape as time)
-  - units: string array [num_signals]
-  - name: string array [num_signals]
+HDF5 internal layout (per configured group):
+  /GROUP_NAME/
+      GROUP_NAME_V   float64 [num_signals, num_samples]  (values)
+      GROUP_NAME_T   float64 [num_samples]               (time)
+      GROUP_NAME_P   float64 [num_samples]               (positions)
+      GROUP_NAME_N   str     [num_signals]               (signal names)
+      GROUP_NAME_U   str     [num_signals]               (units)
+
+Dataset names are built as: group_name + suffix (e.g., "GROUP_T0_V").
 """
 
 import threading
@@ -34,13 +37,6 @@ class MockHDF5File:
     """
 
     def __init__(self, file_path: str, mode: str = "r"):
-        """
-        Initialize mock HDF5 file.
-
-        Args:
-            file_path: Path to the file (for compatibility with h5py.File)
-            mode: File mode (for compatibility, typically "r")
-        """
         self.file_path = file_path
         self.mode = mode
         self._groups: Dict[str, Dict[str, np.ndarray]] = {}
@@ -50,20 +46,21 @@ class MockHDF5File:
             self._load_mock_data()
 
     def _load_mock_data(self) -> None:
-        """Load mock data for testing."""
-        # Create a test batch with sample data
+        """Load mock data using the configured schema."""
         num_signals = 4
         num_samples = 1000
-        self._groups[S.DEFAULT_BATCH] = {
-            S.VALUES: np.random.randn(num_signals, num_samples).astype(np.float64),
-            S.TIME: np.linspace(0, 10, num_samples).astype(np.float64),
-            S.POSITIONS: np.linspace(0, 10, num_samples).astype(np.float64),
-            S.UNITS: np.array(["m", "m/s", "A", "V"], dtype=object),
-            S.NAMES: np.array(["position", "velocity", "current", "voltage"], dtype=object),
-        }
+
+        for group_name in S.GROUP_NAMES:
+            self._groups[group_name] = {
+                S.ds(group_name, S.VALUE_SUFFIX): np.random.randn(num_signals, num_samples).astype(np.float64),
+                S.ds(group_name, S.TIME_SUFFIX): np.linspace(0, 10, num_samples).astype(np.float64),
+                S.ds(group_name, S.POSITION_SUFFIX): np.linspace(0, 10, num_samples).astype(np.float64),
+                S.ds(group_name, S.UNITS_SUFFIX): np.array(["m", "m/s", "A", "V"], dtype=object),
+                S.ds(group_name, S.NAMES_SUFFIX): np.array(["position", "velocity", "current", "voltage"], dtype=object),
+            }
 
     def keys(self) -> List[str]:
-        """Get batch group names."""
+        """Get group names."""
         if self._closed:
             raise ValueError("I/O operation on closed file")
         return list(self._groups.keys())
@@ -76,16 +73,19 @@ class MockHDF5File:
             raise KeyError(f"Group '{key}' not found")
         return MockHDF5Group(self._groups[key])
 
+    def __contains__(self, key: str) -> bool:
+        """Check if group exists."""
+        if self._closed:
+            raise ValueError("I/O operation on closed file")
+        return key in self._groups
+
     def close(self) -> None:
-        """Close the file."""
         self._closed = True
 
     def __enter__(self):
-        """Context manager entry."""
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit."""
         self.close()
 
 
@@ -93,36 +93,26 @@ class MockHDF5Group:
     """Mock HDF5 group to access datasets."""
 
     def __init__(self, data_dict: Dict[str, np.ndarray]):
-        """
-        Initialize mock group.
-
-        Args:
-            data_dict: Dictionary of dataset name -> numpy array
-        """
         self._data = data_dict
 
     def keys(self) -> List[str]:
-        """Get dataset names."""
         return list(self._data.keys())
 
     def __getitem__(self, key: str) -> np.ndarray:
-        """Get dataset array."""
         if key not in self._data:
             raise KeyError(f"Dataset '{key}' not found")
         return self._data[key]
 
+    def __contains__(self, key: str) -> bool:
+        return key in self._data
+
 
 def create_test_file(file_path: str) -> None:
     """
-    Create a test HDF5 file with sample data.
-
-    Uses h5py if available, otherwise creates a numpy-backed mock file.
+    Create a test HDF5 file with sample data using the configured schema.
 
     Args:
         file_path: Path where test file should be created
-
-    Raises:
-        IOError: If file cannot be created
     """
     Path(file_path).parent.mkdir(parents=True, exist_ok=True)
 
@@ -132,20 +122,31 @@ def create_test_file(file_path: str) -> None:
                 num_signals = 4
                 num_samples = 1000
 
-                grp = f.create_group(S.DEFAULT_BATCH)
-                grp.create_dataset(S.VALUES, data=np.random.randn(num_signals, num_samples).astype(np.float64))
-                grp.create_dataset(S.TIME, data=np.linspace(0, 10, num_samples).astype(np.float64))
-                grp.create_dataset(
-                    S.POSITIONS,
-                    data=np.linspace(0, 10, num_samples).astype(np.float64),
-                )
-                grp.create_dataset(S.UNITS, data=np.array(["m", "m/s", "A", "V"], dtype=object))
-                grp.create_dataset(S.NAMES, data=np.array(["position", "velocity", "current", "voltage"], dtype=object))
+                for group_name in S.GROUP_NAMES:
+                    grp = f.create_group(group_name)
+                    grp.create_dataset(
+                        S.ds(group_name, S.VALUE_SUFFIX),
+                        data=np.random.randn(num_signals, num_samples).astype(np.float64),
+                    )
+                    grp.create_dataset(
+                        S.ds(group_name, S.TIME_SUFFIX),
+                        data=np.linspace(0, 10, num_samples).astype(np.float64),
+                    )
+                    grp.create_dataset(
+                        S.ds(group_name, S.POSITION_SUFFIX),
+                        data=np.linspace(0, 10, num_samples).astype(np.float64),
+                    )
+                    grp.create_dataset(
+                        S.ds(group_name, S.UNITS_SUFFIX),
+                        data=np.array(["m", "m/s", "A", "V"], dtype=object),
+                    )
+                    grp.create_dataset(
+                        S.ds(group_name, S.NAMES_SUFFIX),
+                        data=np.array(["position", "velocity", "current", "voltage"], dtype=object),
+                    )
         except Exception as e:
             raise IOError(f"Failed to create HDF5 test file at {file_path}: {e}") from e
     else:
-        # Create a mock file by saving to numpy format
-        # In production, h5py should be available
         mock_file = MockHDF5File(file_path, mode="w")
         mock_file._load_mock_data()
 
@@ -154,27 +155,11 @@ class HDF5Reader:
     """
     Robust HDF5 file reader with lazy loading and metadata caching.
 
-    Features:
-      - Row-slice access for efficient memory usage
-      - Thread-safe file operations
-      - Comprehensive metadata caching
-      - Statistical summaries without full data load
-      - Graceful fallback to mock file if h5py unavailable
+    Reads only the groups listed in HDF5Schema.GROUP_NAMES.
+    Dataset names are built from group_name + suffix.
     """
 
     def __init__(self, file_path: str):
-        """
-        Initialize HDF5 reader.
-
-        Validates file existence and caches metadata.
-
-        Args:
-            file_path: Path to HDF5 file
-
-        Raises:
-            FileNotFoundError: If file does not exist
-            ValueError: If file is not a valid HDF5 file
-        """
         self.file_path = Path(file_path)
 
         if not self.file_path.exists():
@@ -182,10 +167,9 @@ class HDF5Reader:
 
         self._lock = threading.Lock()
         self._file_handle = None
-        self._batches_cache: Optional[List[str]] = None
+        self._groups_cache: Optional[List[str]] = None
         self._metadata_cache: Dict[str, Dict] = {}
 
-        # Validate file by attempting to open
         self._validate_file()
 
     def _validate_file(self) -> None:
@@ -198,39 +182,41 @@ class HDF5Reader:
             raise ValueError(f"Invalid HDF5 file: {self.file_path}") from e
 
     def _open_file(self):
-        """
-        Open HDF5 file with h5py or mock fallback.
-
-        Returns:
-            File handle (h5py.File or MockHDF5File)
-        """
         if HAS_H5PY:
             return h5py.File(self.file_path, "r")
         else:
             return MockHDF5File(str(self.file_path), "r")
 
-    def get_batches(self) -> List[str]:
+    def get_groups(self) -> List[str]:
         """
-        Get list of all batch group names.
+        Get list of configured group names that exist in the file.
+
+        Returns only groups from HDF5Schema.GROUP_NAMES that are
+        actually present in the HDF5 file.
 
         Returns:
-            Sorted list of batch names (e.g., ["batch_001", "batch_002"])
+            Sorted list of group names
         """
-        if self._batches_cache is not None:
-            return self._batches_cache
+        if self._groups_cache is not None:
+            return self._groups_cache
 
         with self._lock:
             with self._open_file() as f:
-                self._batches_cache = sorted(f.keys())
+                file_keys = list(f.keys())
+                # Return only configured groups that exist in the file
+                self._groups_cache = [g for g in S.GROUP_NAMES if g in file_keys]
 
-        return self._batches_cache
+        return self._groups_cache
 
-    def get_batch_metadata(self, batch_name: str) -> Dict:
+    # Keep backward-compatible alias
+    get_batches = get_groups
+
+    def get_group_metadata(self, group_name: str) -> Dict:
         """
-        Get metadata for a batch without loading signal data.
+        Get metadata for a group without loading signal data.
 
         Args:
-            batch_name: Name of the batch group
+            group_name: Name of the HDF5 group
 
         Returns:
             Dictionary with:
@@ -240,31 +226,38 @@ class HDF5Reader:
               - units: List[str]
 
         Raises:
-            ValueError: If batch does not exist
+            ValueError: If group does not exist or is missing required datasets
         """
-        if batch_name in self._metadata_cache:
-            return self._metadata_cache[batch_name]
+        if group_name in self._metadata_cache:
+            return self._metadata_cache[group_name]
+
+        ds_values = S.ds(group_name, S.VALUE_SUFFIX)
+        ds_names = S.ds(group_name, S.NAMES_SUFFIX)
+        ds_units = S.ds(group_name, S.UNITS_SUFFIX)
 
         with self._lock:
             with self._open_file() as f:
-                if batch_name not in f:
-                    raise ValueError(f"Batch '{batch_name}' not found")
+                if group_name not in f:
+                    raise ValueError(f"Group '{group_name}' not found")
 
-                batch = f[batch_name]
+                group = f[group_name]
 
-                if S.VALUES not in batch or S.NAMES not in batch:
-                    raise ValueError(f"Batch '{batch_name}' missing required datasets")
+                if ds_values not in group or ds_names not in group:
+                    raise ValueError(
+                        f"Group '{group_name}' missing required datasets "
+                        f"(expected '{ds_values}' and '{ds_names}')"
+                    )
 
-                signal_count = batch[S.VALUES].shape[0]
-                sample_count = batch[S.VALUES].shape[1]
+                signal_count = group[ds_values].shape[0]
+                sample_count = group[ds_values].shape[1]
                 signal_names = [
                     n.decode("utf-8") if isinstance(n, bytes) else str(n)
-                    for n in batch[S.NAMES][:]
+                    for n in group[ds_names][:]
                 ]
                 units = [
                     u.decode("utf-8") if isinstance(u, bytes) else str(u)
-                    for u in batch[S.UNITS][:]
-                ] if S.UNITS in batch else [""] * signal_count
+                    for u in group[ds_units][:]
+                ] if ds_units in group else [""] * signal_count
 
                 metadata = {
                     "signal_count": signal_count,
@@ -273,13 +266,16 @@ class HDF5Reader:
                     "units": units,
                 }
 
-                self._metadata_cache[batch_name] = metadata
+                self._metadata_cache[group_name] = metadata
 
         return metadata
 
+    # Keep backward-compatible alias
+    get_batch_metadata = get_group_metadata
+
     def load_signal(
         self,
-        batch_name: str,
+        group_name: str,
         signal_index: int,
         start: int = 0,
         end: Optional[int] = None,
@@ -287,56 +283,62 @@ class HDF5Reader:
         """
         Load a single signal row with optional slicing.
 
-        Uses lazy row-slice access to minimize memory usage.
-
         Args:
-            batch_name: Name of the batch group
+            group_name: Name of the HDF5 group
             signal_index: Index of signal (0-based)
             start: Start sample index (inclusive)
             end: End sample index (exclusive), None for all
 
         Returns:
             Tuple of (time_array, signal_values)
-              - time_array: shape [num_samples]
-              - signal_values: shape [num_samples]
 
         Raises:
-            ValueError: If batch or signal index invalid
+            ValueError: If group or signal index invalid
             IndexError: If indices out of range
         """
-        metadata = self.get_batch_metadata(batch_name)
+        metadata = self.get_group_metadata(group_name)
 
         if signal_index < 0 or signal_index >= metadata["signal_count"]:
-            raise IndexError(f"Signal index {signal_index} out of range [0, {metadata['signal_count']})")
+            raise IndexError(
+                f"Signal index {signal_index} out of range "
+                f"[0, {metadata['signal_count']})"
+            )
+
+        ds_values = S.ds(group_name, S.VALUE_SUFFIX)
+        ds_time = S.ds(group_name, S.TIME_SUFFIX)
 
         with self._lock:
             with self._open_file() as f:
-                batch = f[batch_name]
+                group = f[group_name]
+
+                # Resolve end index
+                if end is None:
+                    end = metadata["sample_count"]
+                elif end > metadata["sample_count"]:
+                    raise IndexError(
+                        f"end ({end}) exceeds sample count ({metadata['sample_count']})"
+                    )
 
                 # Load time array (may be per-signal or shared)
-                time_array = batch[S.TIME][:]
+                time_array = group[ds_time][:]
                 if len(time_array.shape) == 2:
-                    time_data = time_array[signal_index]
+                    time_data = time_array[signal_index, start:end]
                 else:
-                    time_data = time_array
+                    time_data = time_array[start:end]
 
                 # Load single signal row (lazy slice)
-                signal_data = batch[S.VALUES][signal_index, start:end]
-
-                # Ensure consistent length
-                if len(time_data) != len(signal_data):
-                    # Resample time to match signal length
-                    if len(time_data.shape) == 1:
-                        time_data = np.linspace(time_data[0], time_data[-1], len(signal_data))
+                signal_data = group[ds_values][signal_index, start:end]
 
         return time_data.astype(np.float64), signal_data.astype(np.float64)
 
-    def load_signal_by_name(self, batch_name: str, signal_name: str) -> Tuple[np.ndarray, np.ndarray]:
+    def load_signal_by_name(
+        self, group_name: str, signal_name: str
+    ) -> Tuple[np.ndarray, np.ndarray]:
         """
         Load signal by name instead of index.
 
         Args:
-            batch_name: Name of the batch group
+            group_name: Name of the HDF5 group
             signal_name: Name of the signal
 
         Returns:
@@ -345,44 +347,39 @@ class HDF5Reader:
         Raises:
             ValueError: If signal name not found
         """
-        metadata = self.get_batch_metadata(batch_name)
+        metadata = self.get_group_metadata(group_name)
 
         try:
             signal_index = metadata["signal_names"].index(signal_name)
         except ValueError as e:
-            raise ValueError(f"Signal '{signal_name}' not found in batch '{batch_name}'") from e
+            raise ValueError(
+                f"Signal '{signal_name}' not found in group '{group_name}'"
+            ) from e
 
-        return self.load_signal(batch_name, signal_index)
+        return self.load_signal(group_name, signal_index)
 
-    def get_signal_stats(self, batch_name: str, signal_index: int) -> Dict:
+    def get_signal_stats(self, group_name: str, signal_index: int) -> Dict:
         """
         Get statistical summary of a signal without loading all data.
 
         Args:
-            batch_name: Name of the batch group
+            group_name: Name of the HDF5 group
             signal_index: Index of signal
 
         Returns:
-            Dictionary with:
-              - mean: float
-              - std: float
-              - min: float
-              - max: float
-              - median: float
-              - samples: int
-
-        Raises:
-            ValueError: If batch or signal index invalid
+            Dictionary with mean, std, min, max, median, samples
         """
-        metadata = self.get_batch_metadata(batch_name)
+        metadata = self.get_group_metadata(group_name)
 
         if signal_index < 0 or signal_index >= metadata["signal_count"]:
             raise IndexError(f"Signal index {signal_index} out of range")
 
+        ds_values = S.ds(group_name, S.VALUE_SUFFIX)
+
         with self._lock:
             with self._open_file() as f:
-                batch = f[batch_name]
-                signal_data = batch[S.VALUES][signal_index, :]
+                group = f[group_name]
+                signal_data = group[ds_values][signal_index, :]
 
         return {
             "mean": float(np.mean(signal_data)),
@@ -394,11 +391,7 @@ class HDF5Reader:
         }
 
     def close(self) -> None:
-        """
-        Close the file handle and cleanup resources.
-
-        Safe to call multiple times.
-        """
+        """Close the file handle and cleanup resources."""
         with self._lock:
             if self._file_handle is not None:
                 try:
@@ -408,13 +401,10 @@ class HDF5Reader:
                 self._file_handle = None
 
     def __enter__(self):
-        """Context manager entry."""
         return self
 
     def __exit__(self, exc_type, exc_val, exc_tb):
-        """Context manager exit."""
         self.close()
 
     def __repr__(self) -> str:
-        """String representation."""
-        return f"HDF5Reader(file={self.file_path.name}, batches={len(self.get_batches())})"
+        return f"HDF5Reader(file={self.file_path.name}, groups={len(self.get_groups())})"

@@ -37,7 +37,7 @@ class TestMockHDF5File(unittest.TestCase):
             mock_file = MockHDF5File(str(file_path), mode="r")
             keys = mock_file.keys()
             self.assertIsInstance(keys, list)
-            self.assertIn(S.DEFAULT_BATCH, keys)
+            self.assertIn(S.DEFAULT_GROUP, keys)
             mock_file.close()
 
     def test_mock_file_getitem(self):
@@ -47,19 +47,19 @@ class TestMockHDF5File(unittest.TestCase):
             file_path.touch()
 
             mock_file = MockHDF5File(str(file_path), mode="r")
-            batch = mock_file[S.DEFAULT_BATCH]
-            self.assertIsNotNone(batch)
+            group = mock_file[S.DEFAULT_GROUP]
+            self.assertIsNotNone(group)
             mock_file.close()
 
-    def test_mock_file_invalid_batch(self):
-        """Test accessing invalid batch raises KeyError."""
+    def test_mock_file_invalid_group(self):
+        """Test accessing invalid group raises KeyError."""
         with tempfile.TemporaryDirectory() as tmpdir:
             file_path = Path(tmpdir) / "test.h5"
             file_path.touch()
 
             mock_file = MockHDF5File(str(file_path), mode="r")
             with self.assertRaises(KeyError):
-                _ = mock_file["invalid_batch"]
+                _ = mock_file["invalid_group"]
             mock_file.close()
 
     def test_mock_file_closed_raises(self):
@@ -82,11 +82,23 @@ class TestMockHDF5File(unittest.TestCase):
 
             with MockHDF5File(str(file_path), mode="r") as mock_file:
                 keys = mock_file.keys()
-                self.assertIn(S.DEFAULT_BATCH, keys)
+                self.assertIn(S.DEFAULT_GROUP, keys)
 
             # After context, file should be closed
             with self.assertRaises(ValueError):
                 _ = mock_file.keys()
+
+    def test_mock_file_contains_all_configured_groups(self):
+        """Test that mock file creates all configured groups."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = Path(tmpdir) / "test.h5"
+            file_path.touch()
+
+            mock_file = MockHDF5File(str(file_path), mode="r")
+            keys = mock_file.keys()
+            for group_name in S.GROUP_NAMES:
+                self.assertIn(group_name, keys)
+            mock_file.close()
 
 
 class TestMockHDF5Group(unittest.TestCase):
@@ -94,13 +106,14 @@ class TestMockHDF5Group(unittest.TestCase):
 
     def test_group_keys(self):
         """Test getting dataset names from group."""
+        gn = S.DEFAULT_GROUP
         data_dict = {
-            S.VALUES: np.random.randn(4, 1000),
-            S.TIME: np.linspace(0, 10, 1000),
+            S.ds(gn, S.VALUE_SUFFIX): np.random.randn(4, 1000),
+            S.ds(gn, S.TIME_SUFFIX): np.linspace(0, 10, 1000),
         }
         group = MockHDF5Group(data_dict)
         keys = group.keys()
-        self.assertEqual(set(keys), {S.VALUES, S.TIME})
+        self.assertEqual(set(keys), {S.ds(gn, S.VALUE_SUFFIX), S.ds(gn, S.TIME_SUFFIX)})
 
     def test_group_getitem(self):
         """Test accessing dataset from group."""
@@ -119,6 +132,13 @@ class TestMockHDF5Group(unittest.TestCase):
         with self.assertRaises(KeyError):
             _ = group["invalid"]
 
+    def test_group_contains(self):
+        """Test __contains__ method."""
+        data_dict = {"ds_a": np.random.randn(10)}
+        group = MockHDF5Group(data_dict)
+        self.assertTrue("ds_a" in group)
+        self.assertFalse("ds_b" in group)
+
 
 class TestCreateTestFile(unittest.TestCase):
     """Test create_test_file function."""
@@ -127,28 +147,20 @@ class TestCreateTestFile(unittest.TestCase):
         """Test creating a test HDF5 file."""
         with tempfile.TemporaryDirectory() as tmpdir:
             file_path = Path(tmpdir) / "test.h5"
-
-            # create_test_file requires either h5py or relies on MockHDF5File
-            # Just verify it doesn't raise an error
             try:
                 create_test_file(str(file_path))
-                # File may exist if h5py is available
                 self.assertTrue(True)
             except Exception:
-                # If h5py is not available, that's ok
                 pass
 
     def test_create_test_file_creates_parent(self):
         """Test that create_test_file creates parent directories."""
         with tempfile.TemporaryDirectory() as tmpdir:
             file_path = Path(tmpdir) / "subdir" / "test.h5"
-
             try:
                 create_test_file(str(file_path))
-                # Parent should be created in either case
                 self.assertTrue(file_path.parent.exists())
             except Exception:
-                # If h5py is not available, that's ok
                 pass
 
 
@@ -159,95 +171,79 @@ class TestHDF5Reader(unittest.TestCase):
         """Set up test fixtures."""
         self.tmpdir = tempfile.mkdtemp()
         self.test_file = Path(self.tmpdir) / "test.h5"
-        # Try to create test file; skip if h5py not available
         try:
             create_test_file(str(self.test_file))
-            # Verify the file was created
             if not self.test_file.exists():
                 raise FileNotFoundError(f"File not created: {self.test_file}")
             self.has_h5py = True
-        except Exception as e:
-            # h5py not available or file creation failed
-            self.test_file.touch()  # Create empty file
+        except Exception:
+            self.test_file.touch()
             self.has_h5py = False
 
     def tearDown(self):
-        """Clean up test fixtures."""
         shutil.rmtree(self.tmpdir)
 
     def test_reader_initialization(self):
-        """Test HDF5Reader initialization."""
         if not self.has_h5py:
             self.skipTest("h5py not available")
-
         reader = HDF5Reader(str(self.test_file))
         self.assertIsNotNone(reader)
         reader.close()
 
     def test_reader_file_not_found(self):
-        """Test FileNotFoundError for missing file."""
         with self.assertRaises(FileNotFoundError):
             HDF5Reader("/nonexistent/path/file.h5")
 
-    def test_get_batches(self):
-        """Test getting batch names."""
+    def test_get_groups(self):
+        """Test getting configured group names."""
         if not self.has_h5py:
             self.skipTest("h5py not available")
-
         reader = HDF5Reader(str(self.test_file))
-        batches = reader.get_batches()
-        self.assertIsInstance(batches, list)
-        self.assertIn(S.DEFAULT_BATCH, batches)
+        groups = reader.get_groups()
+        self.assertIsInstance(groups, list)
+        self.assertIn(S.DEFAULT_GROUP, groups)
+        # All configured groups should be present
+        for gn in S.GROUP_NAMES:
+            self.assertIn(gn, groups)
         reader.close()
 
-    def test_get_batches_caching(self):
-        """Test that batch list is cached."""
+    def test_get_groups_caching(self):
         if not self.has_h5py:
             self.skipTest("h5py not available")
-
         reader = HDF5Reader(str(self.test_file))
-        batches1 = reader.get_batches()
-        batches2 = reader.get_batches()
-        self.assertIs(batches1, batches2)  # Same object reference
+        groups1 = reader.get_groups()
+        groups2 = reader.get_groups()
+        self.assertIs(groups1, groups2)
         reader.close()
 
-    def test_get_batch_metadata(self):
-        """Test getting batch metadata."""
+    def test_get_group_metadata(self):
         if not self.has_h5py:
             self.skipTest("h5py not available")
-
         reader = HDF5Reader(str(self.test_file))
-        metadata = reader.get_batch_metadata(S.DEFAULT_BATCH)
-
+        metadata = reader.get_group_metadata(S.DEFAULT_GROUP)
         self.assertIn("signal_count", metadata)
         self.assertIn("sample_count", metadata)
         self.assertIn("signal_names", metadata)
         self.assertIn("units", metadata)
-
         self.assertEqual(metadata["signal_count"], 4)
         self.assertEqual(metadata["sample_count"], 1000)
         self.assertEqual(len(metadata["signal_names"]), 4)
         self.assertEqual(len(metadata["units"]), 4)
         reader.close()
 
-    def test_get_batch_metadata_invalid_batch(self):
-        """Test ValueError for invalid batch."""
+    def test_get_group_metadata_invalid(self):
         if not self.has_h5py:
             self.skipTest("h5py not available")
-
         reader = HDF5Reader(str(self.test_file))
         with self.assertRaises(ValueError):
-            reader.get_batch_metadata("invalid_batch")
+            reader.get_group_metadata("invalid_group")
         reader.close()
 
     def test_load_signal(self):
-        """Test loading a signal."""
         if not self.has_h5py:
             self.skipTest("h5py not available")
-
         reader = HDF5Reader(str(self.test_file))
-        time, signal = reader.load_signal(S.DEFAULT_BATCH, 0)
-
+        time, signal = reader.load_signal(S.DEFAULT_GROUP, 0)
         self.assertEqual(len(time), 1000)
         self.assertEqual(len(signal), 1000)
         self.assertTrue(np.all(np.isfinite(time)))
@@ -255,97 +251,90 @@ class TestHDF5Reader(unittest.TestCase):
         reader.close()
 
     def test_load_signal_with_slicing(self):
-        """Test loading signal with start/end."""
         if not self.has_h5py:
             self.skipTest("h5py not available")
-
         reader = HDF5Reader(str(self.test_file))
-        time, signal = reader.load_signal(S.DEFAULT_BATCH, 0, start=100, end=200)
-
+        time, signal = reader.load_signal(S.DEFAULT_GROUP, 0, start=100, end=200)
         self.assertEqual(len(signal), 100)
         self.assertEqual(len(time), 100)
         reader.close()
 
     def test_load_signal_invalid_index(self):
-        """Test IndexError for invalid signal index."""
         if not self.has_h5py:
             self.skipTest("h5py not available")
-
         reader = HDF5Reader(str(self.test_file))
         with self.assertRaises(IndexError):
-            reader.load_signal(S.DEFAULT_BATCH, 999)
+            reader.load_signal(S.DEFAULT_GROUP, 999)
         reader.close()
 
     def test_load_signal_by_name(self):
-        """Test loading signal by name."""
         if not self.has_h5py:
             self.skipTest("h5py not available")
-
         reader = HDF5Reader(str(self.test_file))
-        time, signal = reader.load_signal_by_name(S.DEFAULT_BATCH, "position")
-
+        time, signal = reader.load_signal_by_name(S.DEFAULT_GROUP, "position")
         self.assertEqual(len(time), 1000)
         self.assertEqual(len(signal), 1000)
         reader.close()
 
     def test_load_signal_by_name_not_found(self):
-        """Test ValueError for invalid signal name."""
         if not self.has_h5py:
             self.skipTest("h5py not available")
-
         reader = HDF5Reader(str(self.test_file))
         with self.assertRaises(ValueError):
-            reader.load_signal_by_name(S.DEFAULT_BATCH, "nonexistent")
+            reader.load_signal_by_name(S.DEFAULT_GROUP, "nonexistent")
         reader.close()
 
     def test_get_signal_stats(self):
-        """Test getting signal statistics."""
         if not self.has_h5py:
             self.skipTest("h5py not available")
-
         reader = HDF5Reader(str(self.test_file))
-        stats = reader.get_signal_stats(S.DEFAULT_BATCH, 0)
-
+        stats = reader.get_signal_stats(S.DEFAULT_GROUP, 0)
         self.assertIn("mean", stats)
         self.assertIn("std", stats)
         self.assertIn("min", stats)
         self.assertIn("max", stats)
         self.assertIn("median", stats)
         self.assertIn("samples", stats)
-
         self.assertEqual(stats["samples"], 1000)
         self.assertTrue(np.isfinite(stats["mean"]))
         self.assertTrue(np.isfinite(stats["std"]))
         reader.close()
 
     def test_get_signal_stats_invalid_index(self):
-        """Test IndexError for invalid signal index in get_signal_stats."""
         if not self.has_h5py:
             self.skipTest("h5py not available")
-
         reader = HDF5Reader(str(self.test_file))
         with self.assertRaises(IndexError):
-            reader.get_signal_stats(S.DEFAULT_BATCH, 999)
+            reader.get_signal_stats(S.DEFAULT_GROUP, 999)
         reader.close()
 
     def test_context_manager(self):
-        """Test context manager usage."""
         if not self.has_h5py:
             self.skipTest("h5py not available")
-
         with HDF5Reader(str(self.test_file)) as reader:
-            batches = reader.get_batches()
-            self.assertIn(S.DEFAULT_BATCH, batches)
+            groups = reader.get_groups()
+            self.assertIn(S.DEFAULT_GROUP, groups)
 
     def test_repr(self):
-        """Test string representation."""
         if not self.has_h5py:
             self.skipTest("h5py not available")
-
         reader = HDF5Reader(str(self.test_file))
         repr_str = repr(reader)
         self.assertIn("HDF5Reader", repr_str)
-        self.assertIn("batch", repr_str)
+        self.assertIn("group", repr_str)
+        reader.close()
+
+    def test_backward_compat_aliases(self):
+        """Test that get_batches and get_batch_metadata still work."""
+        if not self.has_h5py:
+            self.skipTest("h5py not available")
+        reader = HDF5Reader(str(self.test_file))
+        # get_batches should be an alias for get_groups
+        self.assertEqual(reader.get_batches(), reader.get_groups())
+        # get_batch_metadata should be an alias for get_group_metadata
+        meta1 = reader.get_batch_metadata(S.DEFAULT_GROUP)
+        meta2 = reader.get_group_metadata(S.DEFAULT_GROUP)
+        self.assertEqual(meta1, meta2)
         reader.close()
 
 

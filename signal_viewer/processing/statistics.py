@@ -91,13 +91,13 @@ def compute_descriptive_stats(signal: np.ndarray) -> Dict[str, float]:
 def compute_rolling_stats(signal: np.ndarray, window_size: int) -> Dict[str, np.ndarray]:
     """
     Compute rolling statistics with a sliding window.
-    
+
     Uses efficient cumsum-based approach for mean and min/max.
-    
+
     Args:
         signal: 1D array of signal values.
         window_size: Size of the rolling window.
-    
+
     Returns:
         Dictionary with rolling_mean, rolling_std, rolling_min, rolling_max arrays.
     """
@@ -108,7 +108,10 @@ def compute_rolling_stats(signal: np.ndarray, window_size: int) -> Dict[str, np.
             "rolling_min": np.array([]),
             "rolling_max": np.array([]),
         }
-    
+
+    if window_size < 1:
+        raise ValueError(f"window_size must be >= 1, got {window_size}")
+
     signal_clean = np.where(np.isnan(signal), 0.0, signal)
     
     n = len(signal_clean)
@@ -140,11 +143,11 @@ def compute_rolling_stats(signal: np.ndarray, window_size: int) -> Dict[str, np.
 def compute_histogram(signal: np.ndarray, n_bins: int = 50) -> tuple:
     """
     Compute histogram of signal values.
-    
+
     Args:
         signal: 1D array of signal values.
         n_bins: Number of bins (default: 50).
-    
+
     Returns:
         Tuple of (bin_edges, counts) arrays.
         bin_edges: Array of bin edges (length n_bins + 1).
@@ -152,7 +155,10 @@ def compute_histogram(signal: np.ndarray, n_bins: int = 50) -> tuple:
     """
     if len(signal) == 0:
         return np.array([]), np.array([])
-    
+
+    if not isinstance(n_bins, (int, np.integer)) or n_bins < 1:
+        raise ValueError(f"n_bins must be a positive integer, got {n_bins}")
+
     signal_clean = signal[~np.isnan(signal)]
     
     if len(signal_clean) == 0:
@@ -232,6 +238,9 @@ def compute_rainflow(signal: np.ndarray, n_bins: int = 10) -> Dict:
             "total_cycles": 0,
             "total_half_cycles": 0,
         }
+
+    if not isinstance(n_bins, (int, np.integer)) or n_bins < 1:
+        raise ValueError(f"n_bins must be a positive integer, got {n_bins}")
 
     signal_clean = signal[~np.isnan(signal)]
 

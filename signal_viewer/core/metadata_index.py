@@ -1,10 +1,14 @@
 """
 Filesystem Metadata Index for Time Series Data
 
-Scans and indexes HDF5 files organized by serial number and step directories.
+Scans and indexes HDF5 files organized by serial (top-level), folder_1 (pXXX_label),
+and folder_2 (any subfolder) directories.
 Provides efficient lookup and caching of file metadata without parsing HDF5 content.
 
-Folder structure: root/serial_number/step_N/serial_date_crc.h5
+Folder structure: root/serial/pXXX_label/folder_2/file.h5
+
+Steps are keyed as "folder_1/folder_2" combinations so the UI can present
+every subfolder as a distinct selectable entry.
 """
 
 import re
@@ -22,15 +26,15 @@ class MetadataIndex:
     Filesystem scanner and metadata indexer for HDF5 signal files.
 
     Organizes files hierarchically:
-      - serial_number (e.g., "SN001", "SN002")
-        - step_N (e.g., "step_1", "step_5")
-          - files (serial_date_crc.h5)
+      - serial (e.g., "SN001", "SN002")
+        - step = "folder_1/folder_2" (e.g., "p001_motor_test/run_nominal")
+          - files (*.h5)
 
     Features:
       - Automatic scanning on initialization
       - Fast rescan for detecting new files
       - Graceful handling of missing/empty directories
-      - Natural sorting of serial numbers and step indices
+      - Natural sorting of folder names
       - Lazy HDF5 metadata loading
       - Thread-safe operations
     """
@@ -40,7 +44,7 @@ class MetadataIndex:
         Initialize metadata index by scanning filesystem.
 
         Args:
-            root_path: Root directory containing serial_number folders
+            root_path: Root directory containing folder_1 directories
 
         Raises:
             ValueError: If root path does not exist
@@ -54,7 +58,7 @@ class MetadataIndex:
             raise ValueError(f"Root path is not a directory: {root_path}")
 
         self._lock = threading.RLock()
-        self._index: Dict[str, Dict[int, List[Dict]]] = {}
+        self._index: Dict[str, Dict[str, List[Dict]]] = {}
         self._file_info_cache: Dict[str, Dict] = {}
 
         self.rescan()
@@ -66,69 +70,84 @@ class MetadataIndex:
         Safe to call multiple times. Updates index in place.
         """
         with self._lock:
-            new_index: Dict[str, Dict[int, List[Dict]]] = {}
+            new_index: Dict[str, Dict[str, List[Dict]]] = {}
 
-            # Iterate through serial number directories
+            # Iterate through serial directories (top level)
             for serial_dir in sorted(self.root_path.iterdir()):
-                if not serial_dir.is_dir():
+                if not serial_dir.is_dir() or serial_dir.name.startswith("."):
                     continue
 
-                serial_num = serial_dir.name
+                serial_name = serial_dir.name
+                new_index[serial_name] = {}
 
-                # Skip hidden directories
-                if serial_num.startswith("."):
-                    continue
-
-                new_index[serial_num] = {}
-
-                # Iterate through step_N directories
-                step_dirs = [d for d in serial_dir.iterdir() if d.is_dir() and d.name.startswith(S.STEP_PREFIX)]
-
-                for step_dir in sorted(step_dirs, key=self._natural_sort_step):
-                    step_num = self._parse_step_number(step_dir.name)
-
-                    if step_num is None:
+                # Iterate through folder_1 directories (pXXX_label)
+                for folder1 in sorted(serial_dir.iterdir()):
+                    if not folder1.is_dir() or folder1.name.startswith("."):
                         continue
 
-                    files_list = []
+                    folder1_name = folder1.name
 
-                    # Find all .h5 files in this step directory
-                    h5_files = sorted(step_dir.glob(S.FILE_EXTENSION))
+                    # folder_1 must match the configured pattern
+                    if not re.match(S.FOLDER1_REGEX, folder1_name):
+                        continue
 
-                    for h5_file in h5_files:
-                        file_info = {
-                            "path": str(h5_file),
-                            "filename": h5_file.name,
-                            "size": h5_file.stat().st_size,
-                            "modified": h5_file.stat().st_mtime,
-                        }
-                        files_list.append(file_info)
+                    # Files directly in folder_1 (no folder_2) → step key = folder_1
+                    h5_files_direct = sorted(folder1.glob(S.FILE_EXTENSION))
+                    if h5_files_direct:
+                        files_list = []
+                        for h5_file in h5_files_direct:
+                            files_list.append({
+                                "path": str(h5_file),
+                                "filename": h5_file.name,
+                                "size": h5_file.stat().st_size,
+                                "modified": h5_file.stat().st_mtime,
+                            })
+                        new_index[serial_name][folder1_name] = files_list
 
-                    if files_list:
-                        new_index[serial_num][step_num] = files_list
+                    # Each folder_2 subdirectory → step key = folder_1/folder_2
+                    folder2_dirs = [d for d in folder1.iterdir()
+                                    if d.is_dir() and not d.name.startswith(".")]
+
+                    for folder2 in sorted(folder2_dirs, key=lambda p: self._natural_sort_string(p.name)):
+                        h5_files = sorted(folder2.glob(S.FILE_EXTENSION))
+                        if h5_files:
+                            step_key = f"{folder1_name}/{folder2.name}"
+                            files_list = []
+                            for h5_file in h5_files:
+                                files_list.append({
+                                    "path": str(h5_file),
+                                    "filename": h5_file.name,
+                                    "size": h5_file.stat().st_size,
+                                    "modified": h5_file.stat().st_mtime,
+                                })
+                            new_index[serial_name][step_key] = files_list
 
             self._index = new_index
             self._file_info_cache.clear()
 
     def get_serial_numbers(self) -> List[str]:
         """
-        Get list of all serial numbers.
+        Get list of all serial directory names (top-level).
 
         Returns:
-            Sorted list of serial number directory names
+            Sorted list of serial directory names
         """
         with self._lock:
             return sorted(self._index.keys(), key=self._natural_sort_string)
 
-    def get_steps(self, serial_num: str) -> List[int]:
+    def get_steps(self, serial_num: str) -> List[str]:
         """
-        Get list of all step numbers for a serial number.
+        Get list of all step keys for a serial number.
+
+        Each step is a "folder_1/folder_2" combination (e.g.,
+        "p001_motor_test/run_nominal").  If files exist directly
+        inside folder_1 (no folder_2), that entry is just "folder_1".
 
         Args:
-            serial_num: Serial number identifier
+            serial_num: Serial number identifier (e.g., "SN001")
 
         Returns:
-            Sorted list of step indices
+            Sorted list of step keys (strings)
 
         Raises:
             ValueError: If serial number not found
@@ -137,15 +156,16 @@ class MetadataIndex:
             if serial_num not in self._index:
                 raise ValueError(f"Serial number not found: {serial_num}")
 
-            return sorted(self._index[serial_num].keys())
+            return sorted(self._index[serial_num].keys(),
+                          key=self._natural_sort_string)
 
-    def get_files(self, serial_num: str, step: int) -> List[Dict]:
+    def get_files(self, serial_num: str, step: str) -> List[Dict]:
         """
         Get files for a specific serial number and step.
 
         Args:
             serial_num: Serial number identifier
-            step: Step index number
+            step: Step key ("folder_1/folder_2" or just "folder_1")
 
         Returns:
             List of dicts with: path, filename, size, modified
@@ -158,7 +178,7 @@ class MetadataIndex:
                 raise ValueError(f"Serial number not found: {serial_num}")
 
             if step not in self._index[serial_num]:
-                raise ValueError(f"Step {step} not found for serial number {serial_num}")
+                raise ValueError(f"Step '{step}' not found for serial number {serial_num}")
 
             files = self._index[serial_num][step]
             return [f.copy() for f in files]
@@ -167,7 +187,7 @@ class MetadataIndex:
         """
         Get detailed info about an HDF5 file by reading its contents.
 
-        Opens the HDF5 file briefly to get batch and signal information.
+        Opens the HDF5 file briefly to get group and signal information.
         Results are cached.
 
         Args:
@@ -179,14 +199,17 @@ class MetadataIndex:
               - filename: str
               - size: int
               - modified: float
-              - batches: List[str]
-              - signal_counts: Dict[batch_name -> int]
+              - groups: List[str]
+              - signal_counts: Dict[group_name -> int]
 
         Raises:
             FileNotFoundError: If file does not exist
-            ValueError: If file is not a valid HDF5 file
+            ValueError: If file is not a valid HDF5 file or outside index root
         """
         file_path = str(Path(file_path).resolve())
+        root_resolved = str(self.root_path.resolve())
+        if not file_path.startswith(root_resolved + "/"):
+            raise ValueError("File path outside index root")
 
         with self._lock:
             if file_path in self._file_info_cache:
@@ -194,12 +217,12 @@ class MetadataIndex:
 
         try:
             with HDF5Reader(file_path) as reader:
-                batches = reader.get_batches()
+                groups = reader.get_groups()
                 signal_counts = {}
 
-                for batch in batches:
-                    metadata = reader.get_batch_metadata(batch)
-                    signal_counts[batch] = metadata["signal_count"]
+                for group in groups:
+                    metadata = reader.get_group_metadata(group)
+                    signal_counts[group] = metadata["signal_count"]
 
                 file_obj = Path(file_path)
                 info = {
@@ -207,7 +230,7 @@ class MetadataIndex:
                     "filename": file_obj.name,
                     "size": file_obj.stat().st_size,
                     "modified": file_obj.stat().st_mtime,
-                    "batches": batches,
+                    "groups": groups,
                     "signal_counts": signal_counts,
                 }
 
@@ -232,7 +255,7 @@ class MetadataIndex:
                   "name": str,
                   "steps": [
                     {
-                      "index": int,
+                      "name": str,
                       "files": [
                         {
                           "path": str,
@@ -264,7 +287,7 @@ class MetadataIndex:
 
                 for step in self.get_steps(serial_num):
                     step_entry = {
-                        "index": step,
+                        "name": step,
                         "files": self.get_files(serial_num, step),
                     }
                     serial_entry["steps"].append(step_entry)
@@ -284,25 +307,6 @@ class MetadataIndex:
         return json.dumps(index_dict, indent=2)
 
     @staticmethod
-    def _parse_step_number(step_dir_name: str) -> Optional[int]:
-        """
-        Extract step number from directory name.
-
-        Examples:
-          - "step_1" -> 1
-          - "step_42" -> 42
-          - "invalid" -> None
-
-        Args:
-            step_dir_name: Directory name
-
-        Returns:
-            Step number or None if format is invalid
-        """
-        match = re.match(S.STEP_REGEX, step_dir_name)
-        return int(match.group(1)) if match else None
-
-    @staticmethod
     def _natural_sort_string(s: str) -> tuple:
         """
         Return sort key for natural sorting of strings.
@@ -310,7 +314,7 @@ class MetadataIndex:
         Handles embedded numbers naturally.
 
         Example:
-          - "SN1" < "SN2" < "SN10" (not "SN1" < "SN10" < "SN2")
+          - "run_1" < "run_2" < "run_10" (not "run_1" < "run_10" < "run_2")
 
         Args:
             s: String to sort
@@ -322,20 +326,6 @@ class MetadataIndex:
             return int(text) if text.isdigit() else text.lower()
 
         return tuple(convert(c) for c in re.split(r"(\d+)", s))
-
-    @staticmethod
-    def _natural_sort_step(path: Path) -> tuple:
-        """
-        Return sort key for natural sorting of step directories.
-
-        Args:
-            path: Path object
-
-        Returns:
-            Tuple suitable for sorting
-        """
-        step_num = MetadataIndex._parse_step_number(path.name)
-        return (step_num,) if step_num is not None else (float("inf"),)
 
     def __repr__(self) -> str:
         """String representation."""

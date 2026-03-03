@@ -4,25 +4,29 @@ Generate realistic dummy HDF5 data for testing the Signal Viewer.
 
 Creates a folder structure matching the expected layout:
     data/
-    ├── SN1001/
-    │   ├── step_1/
-    │   │   └── SN1001_2024-06-15_a3f1c2.h5
-    │   ├── step_2/
-    │   │   └── SN1001_2024-06-15_b7d4e8.h5
-    │   └── step_3/
-    │       └── SN1001_2024-06-15_c9a2f5.h5
-    ├── SN1002/
-    │   ├── step_1/ ...
-    │   └── step_2/ ...
-    └── SN1003/
-        └── step_1/ ...
+    ├── p001_motor_test/
+    │   ├── run_nominal/
+    │   │   └── p001_motor_test_2024-06-16_a3f1c2.h5
+    │   ├── run_overload/
+    │   │   └── ...
+    │   └── warmup/
+    │       └── ...
+    ├── p002_vibration_study/
+    │   ├── baseline/
+    │   │   └── ...
+    │   └── loaded/
+    │       └── ...
+    └── p003_endurance/
+        └── cycle_1/
+            └── ...
 
-Each HDF5 file contains 2-3 batch groups, each batch has:
-  - value:               float64[num_signals, num_samples]
-  - time:                float64[num_samples]
-  - corrected_positions: float64[num_samples]
-  - units:               str[num_signals]
-  - name:                str[num_signals]
+Each HDF5 file contains groups from HDF5Schema.GROUP_NAMES.
+Each group has datasets named GROUP_NAME + suffix:
+  - GROUP_NAME_V:  float64[num_signals, num_samples]  (values)
+  - GROUP_NAME_T:  float64[num_samples]                (time)
+  - GROUP_NAME_P:  float64[num_samples]                (positions)
+  - GROUP_NAME_N:  str[num_signals]                    (signal names)
+  - GROUP_NAME_U:  str[num_signals]                    (units)
 
 Signals are realistic engineering waveforms: vibration, temperature,
 pressure, motor current, position encoder, voltage rail, flow rate, etc.
@@ -240,26 +244,42 @@ SIGNAL_CATALOGUE = [
 # ---------------------------------------------------------------------------
 
 SYSTEMS = [
-    {"serial": "SN1001", "steps": 3, "batches_per_step": [2, 3, 3]},
-    {"serial": "SN1002", "steps": 2, "batches_per_step": [2, 2]},
-    {"serial": "SN1003", "steps": 1, "batches_per_step": [3]},
+    {
+        "serial": "SN001",
+        "folder1": "p001_motor_test",
+        "folder2s": ["run_nominal", "run_overload", "warmup"],
+    },
+    {
+        "serial": "SN002",
+        "folder1": "p002_vibration_study",
+        "folder2s": ["baseline", "loaded"],
+    },
+    {
+        "serial": "SN003",
+        "folder1": "p003_endurance",
+        "folder2s": ["cycle_1"],
+    },
 ]
 
 
-def _make_crc(serial: str, step: int, batch_idx: int) -> str:
+def _make_crc(folder1: str, folder2: str) -> str:
     """Deterministic 6-char hex hash for filename."""
-    raw = f"{serial}-step{step}-batch{batch_idx}".encode()
+    raw = f"{folder1}-{folder2}".encode()
     return hashlib.md5(raw).hexdigest()[:6]
 
 
-def generate_batch(
+def generate_group(
     grp: h5py.Group,
+    group_name: str,
     rng: np.random.Generator,
     num_signals: int,
     num_samples: int,
     duration_sec: float,
 ) -> None:
-    """Populate one HDF5 group with realistic signal data."""
+    """Populate one HDF5 group with realistic signal data.
+
+    Dataset names are built as group_name + suffix.
+    """
     t = np.linspace(0, duration_sec, num_samples, dtype=np.float64)
     corrected = t + rng.uniform(-0.0001, 0.0001, size=num_samples)
 
@@ -277,11 +297,11 @@ def generate_batch(
         names.append(sig_name)
         units.append(sig_unit)
 
-    grp.create_dataset(S.TIME, data=t)
-    grp.create_dataset(S.POSITIONS, data=corrected)
-    grp.create_dataset(S.VALUES, data=values)
-    grp.create_dataset(S.NAMES, data=np.array(names, dtype="S64"))
-    grp.create_dataset(S.UNITS, data=np.array(units, dtype="S32"))
+    grp.create_dataset(S.ds(group_name, S.TIME_SUFFIX), data=t)
+    grp.create_dataset(S.ds(group_name, S.POSITION_SUFFIX), data=corrected)
+    grp.create_dataset(S.ds(group_name, S.VALUE_SUFFIX), data=values)
+    grp.create_dataset(S.ds(group_name, S.NAMES_SUFFIX), data=np.array(names, dtype="S64"))
+    grp.create_dataset(S.ds(group_name, S.UNITS_SUFFIX), data=np.array(units, dtype="S32"))
 
 
 def generate_all(data_root: Path, seed: int = 42) -> None:
@@ -292,32 +312,32 @@ def generate_all(data_root: Path, seed: int = 42) -> None:
 
     for system in SYSTEMS:
         serial = system["serial"]
-        print(f"  {serial}:")
+        folder1 = system["folder1"]
+        print(f"  {serial}/{folder1}:")
 
-        for step_idx in range(1, system["steps"] + 1):
-            step_dir = data_root / serial / f"{S.STEP_PREFIX}{step_idx}"
-            step_dir.mkdir(parents=True, exist_ok=True)
+        for f2_idx, folder2 in enumerate(system["folder2s"]):
+            folder2_dir = data_root / serial / folder1 / folder2
+            folder2_dir.mkdir(parents=True, exist_ok=True)
 
-            n_batches = system["batches_per_step"][step_idx - 1]
-            crc = _make_crc(serial, step_idx, 0)
-            filename = f"{serial}_2024-06-{15 + step_idx:02d}_{crc}{S.FILE_SUFFIX}"
-            filepath = step_dir / filename
+            crc = _make_crc(folder1, folder2)
+            filename = f"{folder1}_2024-06-{16 + f2_idx:02d}_{crc}{S.FILE_SUFFIX}"
+            filepath = folder2_dir / filename
 
-            # Each step adds more signals (incremental processing)
+            # Each folder_2 adds more signals
             base_signals = 8
-            signals_this_step = min(base_signals + (step_idx - 1) * 4, len(SIGNAL_CATALOGUE))
+            signals_this = min(base_signals + f2_idx * 4, len(SIGNAL_CATALOGUE))
             samples = rng.integers(50_000, 150_001)
             duration = rng.uniform(5.0, 30.0)
 
             with h5py.File(filepath, "w") as f:
-                for b in range(n_batches):
-                    batch_name = S.BATCH_FORMAT.format(b)
-                    grp = f.create_group(batch_name)
-                    generate_batch(grp, rng, signals_this_step, int(samples), duration)
+                for group_name in S.GROUP_NAMES:
+                    grp = f.create_group(group_name)
+                    generate_group(grp, group_name, rng, signals_this, int(samples), duration)
 
             size_mb = filepath.stat().st_size / (1024 * 1024)
-            print(f"    step_{step_idx}/{filename}  ({n_batches} batches, "
-                  f"{signals_this_step} signals, {samples} samples, {size_mb:.1f} MB)")
+            n_groups = len(S.GROUP_NAMES)
+            print(f"    {folder2}/{filename}  ({n_groups} groups, "
+                  f"{signals_this} signals, {samples} samples, {size_mb:.1f} MB)")
             total_files += 1
 
     print(f"\nGenerated {total_files} HDF5 files in {data_root}")
