@@ -44,13 +44,21 @@ class HDF5Schema:
       - folder_1: pXXX_label  (e.g. p001_motor_test)
       - folder_2: any subfolder name (e.g. run_nominal, warmup)
 
-    HDF5 internal layout:
+    HDF5 internal layout (per group):
       /GROUP_NAME/
-          GROUP_NAME_V   float64 [num_signals, num_samples]  (values)
-          GROUP_NAME_T   float64 [num_samples]               (time)
-          GROUP_NAME_P   float64 [num_samples]               (positions)
-          GROUP_NAME_N   str     [num_signals]               (signal names)
-          GROUP_NAME_U   str     [num_signals]               (units)
+          GROUP_NAME_V   float64 [num_signals, max_samples]  signal values
+          GROUP_NAME_T   float64 [num_signals]               start time per signal
+          GROUP_NAME_FS  float64 [num_signals]               sampling freq per signal
+          GROUP_NAME_NS  int64   [num_signals]  (optional)   valid sample count
+          GROUP_NAME_N   str     [num_signals]               signal names
+          GROUP_NAME_U   str     [num_signals]               units
+
+    Batch types:
+      - Type A: _NS dataset exists → each signal has n_sample[i] valid points
+      - Type B: _NS dataset absent → full value matrix is valid (rectangular)
+
+    Time construction (both types):
+      time[i] = T[i] + arange(length) / FS[i]
     """
 
     # -- Filesystem conventions -----------------------------------------------
@@ -63,11 +71,12 @@ class HDF5Schema:
     GROUP_NAMES = ['GROUP_T0', 'GROUP_T1']  # top-level groups to read
 
     # -- Dataset suffix convention (appended to group name) -------------------
-    VALUE_SUFFIX    = '_V'           # float64 matrix [num_signals, num_samples]
-    TIME_SUFFIX     = '_T'           # float64 array  [num_samples]
-    POSITION_SUFFIX = '_P'           # float64 array  [num_samples]
-    NAMES_SUFFIX    = '_N'           # string array   [num_signals]
-    UNITS_SUFFIX    = '_U'           # string array   [num_signals]
+    VALUE_SUFFIX         = '_V'      # float64 [num_signals, max_samples]
+    TIME_SUFFIX          = '_T'      # float64 [num_signals]  start time
+    SAMPLING_FREQ_SUFFIX = '_FS'     # float64 [num_signals]  sampling frequency
+    NSAMPLE_SUFFIX       = '_NS'     # int64   [num_signals]  valid sample count (Type A)
+    NAMES_SUFFIX         = '_N'      # str     [num_signals]  signal names
+    UNITS_SUFFIX         = '_U'      # str     [num_signals]  units
 
     # -- Default group for tests / mocks --------------------------------------
     DEFAULT_GROUP   = 'GROUP_T0'

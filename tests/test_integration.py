@@ -10,8 +10,7 @@ tornado.testing.AsyncHTTPTestCase. Includes:
   - Error handling (404, 400 responses)
   - Cache statistics endpoint
 
-NOTE: These tests require h5py to be installed. If h5py is not available,
-tests will be skipped. Install with: pip install h5py
+When h5py is not installed, tests use MockHDF5File for full coverage.
 """
 
 import base64
@@ -28,19 +27,12 @@ import numpy as np
 import tornado.testing
 import tornado.ioloop
 
-try:
-    import h5py
-    HAS_H5PY = True
-except ImportError:
-    HAS_H5PY = False
-
 from signal_viewer import config
 from signal_viewer.config import HDF5Schema as S
 from signal_viewer.core.hdf5_reader import create_test_file
 from signal_viewer.server.app import make_app
 
 
-@unittest.skipIf(not HAS_H5PY, "h5py not installed - integration tests require h5py")
 class IntegrationTestBase(tornado.testing.AsyncHTTPTestCase):
     """Base class for integration tests with test data setup."""
 
@@ -225,9 +217,10 @@ class TestBatchesAndSignals(IntegrationTestBase):
         self.assertIn('name', response)
         self.assertIn('units', response)
         self.assertIn('samples', response)
-        self.assertEqual(response['samples'], 1000)
-        self.assertEqual(len(response['time']), 1000)
-        self.assertEqual(len(response['values']), 1000)
+        # DEFAULT_GROUP (GROUP_T0) is Type A: signal 0 has n_sample=800
+        self.assertEqual(response['samples'], 800)
+        self.assertEqual(len(response['time']), 800)
+        self.assertEqual(len(response['values']), 800)
 
     def test_get_signal_with_downsampling(self):
         """Test signal downsampling with downsample query parameter."""
@@ -304,8 +297,9 @@ class TestAnalysisEndpoints(IntegrationTestBase):
         self.assertIn('fitted', response)
         self.assertIn('residuals', response)
         self.assertIn('time', response)
-        self.assertEqual(len(response['fitted']), 1000)
-        self.assertEqual(len(response['residuals']), 1000)
+        # DEFAULT_GROUP (GROUP_T0) is Type A: signal 0 has n_sample=800
+        self.assertEqual(len(response['fitted']), 800)
+        self.assertEqual(len(response['residuals']), 800)
 
     def test_correlation_analysis(self):
         """Test POST /api/analysis/correlation computes cross-correlation."""

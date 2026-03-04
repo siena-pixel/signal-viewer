@@ -281,15 +281,15 @@ def generate_group(
     Dataset names are built as group_name + suffix.
     """
     t = np.linspace(0, duration_sec, num_samples, dtype=np.float64)
-    corrected = t + rng.uniform(-0.0001, 0.0001, size=num_samples)
 
     # Pick a random subset of signals from the catalogue
     indices = rng.choice(len(SIGNAL_CATALOGUE), size=min(num_signals, len(SIGNAL_CATALOGUE)), replace=False)
     indices.sort()
+    actual_count = len(indices)
 
     names = []
     units = []
-    values = np.empty((len(indices), num_samples), dtype=np.float64)
+    values = np.empty((actual_count, num_samples), dtype=np.float64)
 
     for row, cat_idx in enumerate(indices):
         sig_name, sig_unit, gen_fn = SIGNAL_CATALOGUE[cat_idx]
@@ -297,9 +297,15 @@ def generate_group(
         names.append(sig_name)
         units.append(sig_unit)
 
-    grp.create_dataset(S.ds(group_name, S.TIME_SUFFIX), data=t)
-    grp.create_dataset(S.ds(group_name, S.POSITION_SUFFIX), data=corrected)
+    # Per-signal start times (small random offsets from 0)
+    start_times = rng.uniform(0, 0.01, size=actual_count).astype(np.float64)
+    # Sampling frequency derived from duration and sample count
+    base_fs = float(num_samples) / duration_sec
+    samp_freqs = np.full(actual_count, base_fs, dtype=np.float64)
+
     grp.create_dataset(S.ds(group_name, S.VALUE_SUFFIX), data=values)
+    grp.create_dataset(S.ds(group_name, S.TIME_SUFFIX), data=start_times)
+    grp.create_dataset(S.ds(group_name, S.SAMPLING_FREQ_SUFFIX), data=samp_freqs)
     grp.create_dataset(S.ds(group_name, S.NAMES_SUFFIX), data=np.array(names, dtype="S64"))
     grp.create_dataset(S.ds(group_name, S.UNITS_SUFFIX), data=np.array(units, dtype="S32"))
 

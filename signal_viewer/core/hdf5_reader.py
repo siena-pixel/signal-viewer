@@ -7,13 +7,22 @@ without h5py dependency.
 
 HDF5 internal layout (per configured group):
   /GROUP_NAME/
-      GROUP_NAME_V   float64 [num_signals, num_samples]  (values)
-      GROUP_NAME_T   float64 [num_samples]               (time)
-      GROUP_NAME_P   float64 [num_samples]               (positions)
-      GROUP_NAME_N   str     [num_signals]               (signal names)
-      GROUP_NAME_U   str     [num_signals]               (units)
+      GROUP_NAME_V   float64 [num_signals, max_samples]  signal values
+      GROUP_NAME_T   float64 [num_signals]               start time per signal
+      GROUP_NAME_FS  float64 [num_signals]               sampling freq per signal
+      GROUP_NAME_NS  int64   [num_signals]  (optional)   valid sample count
+      GROUP_NAME_N   str     [num_signals]               signal names
+      GROUP_NAME_U   str     [num_signals]               units
 
-Dataset names are built as: group_name + suffix (e.g., "GROUP_T0_V").
+Batch types:
+  Type A – _NS dataset present: each signal has n_sample[i] valid points.
+  Type B – _NS dataset absent:  full value matrix is valid (rectangular).
+
+Time construction (both types):
+  time = t0 + arange(length) / fs
+  where t0 = _T[signal_index], fs = _FS[signal_index]
+
+Dataset names are built as: group_name + suffix (e.g. "GROUP_T0_V").
 """
 
 import threading
@@ -30,10 +39,17 @@ except ImportError:
     HAS_H5PY = False
 
 
+# ---------------------------------------------------------------------------
+# Mock classes (testing without h5py)
+# ---------------------------------------------------------------------------
+
 class MockHDF5File:
     """
     Mock HDF5 file class that mimics h5py.File using numpy arrays.
     Useful for testing without h5py dependency.
+
+    GROUP_T0 is Type A (has _NS dataset).
+    GROUP_T1 is Type B (no _NS dataset).
     """
 
     def __init__(self, file_path: str, mode: str = "r"):
@@ -48,16 +64,29 @@ class MockHDF5File:
     def _load_mock_data(self) -> None:
         """Load mock data using the configured schema."""
         num_signals = 4
-        num_samples = 1000
+        max_samples = 1000
+        rng = np.random.RandomState(42)
+
+        names = np.array(["position", "velocity", "current", "voltage"], dtype=object)
+        units = np.array(["m", "m/s", "A", "V"], dtype=object)
+        start_times = np.array([0.0, 0.5, 1.0, 2.0], dtype=np.float64)
+        samp_freqs = np.array([100.0, 200.0, 100.0, 500.0], dtype=np.float64)
+        nsample_a = np.array([800, 600, 900, 750], dtype=np.int64)
 
         for group_name in S.GROUP_NAMES:
-            self._groups[group_name] = {
-                S.ds(group_name, S.VALUE_SUFFIX): np.random.randn(num_signals, num_samples).astype(np.float64),
-                S.ds(group_name, S.TIME_SUFFIX): np.linspace(0, 10, num_samples).astype(np.float64),
-                S.ds(group_name, S.POSITION_SUFFIX): np.linspace(0, 10, num_samples).astype(np.float64),
-                S.ds(group_name, S.UNITS_SUFFIX): np.array(["m", "m/s", "A", "V"], dtype=object),
-                S.ds(group_name, S.NAMES_SUFFIX): np.array(["position", "velocity", "current", "voltage"], dtype=object),
+            values = rng.randn(num_signals, max_samples).astype(np.float64)
+            datasets = {
+                S.ds(group_name, S.VALUE_SUFFIX): values,
+                S.ds(group_name, S.TIME_SUFFIX): start_times.copy(),
+                S.ds(group_name, S.SAMPLING_FREQ_SUFFIX): samp_freqs.copy(),
+                S.ds(group_name, S.NAMES_SUFFIX): names.copy(),
+                S.ds(group_name, S.UNITS_SUFFIX): units.copy(),
             }
+            # First group is Type A (has _NS); others are Type B
+            if group_name == S.GROUP_NAMES[0]:
+                datasets[S.ds(group_name, S.NSAMPLE_SUFFIX)] = nsample_a.copy()
+
+            self._groups[group_name] = datasets
 
     def keys(self) -> List[str]:
         """Get group names."""
@@ -107,49 +136,56 @@ class MockHDF5Group:
         return key in self._data
 
 
+# ---------------------------------------------------------------------------
+# Test file creation
+# ---------------------------------------------------------------------------
+
 def create_test_file(file_path: str) -> None:
     """
     Create a test HDF5 file with sample data using the configured schema.
+
+    GROUP_T0 is created as Type A (with _NS dataset).
+    GROUP_T1 is created as Type B (without _NS dataset).
 
     Args:
         file_path: Path where test file should be created
     """
     Path(file_path).parent.mkdir(parents=True, exist_ok=True)
 
+    num_signals = 4
+    max_samples = 1000
+    rng = np.random.RandomState(42)
+
+    names = np.array(["position", "velocity", "current", "voltage"], dtype=object)
+    units = np.array(["m", "m/s", "A", "V"], dtype=object)
+    start_times = np.array([0.0, 0.5, 1.0, 2.0], dtype=np.float64)
+    samp_freqs = np.array([100.0, 200.0, 100.0, 500.0], dtype=np.float64)
+    nsample_a = np.array([800, 600, 900, 750], dtype=np.int64)
+
     if HAS_H5PY:
         try:
             with h5py.File(file_path, "w") as f:
-                num_signals = 4
-                num_samples = 1000
-
                 for group_name in S.GROUP_NAMES:
                     grp = f.create_group(group_name)
-                    grp.create_dataset(
-                        S.ds(group_name, S.VALUE_SUFFIX),
-                        data=np.random.randn(num_signals, num_samples).astype(np.float64),
-                    )
-                    grp.create_dataset(
-                        S.ds(group_name, S.TIME_SUFFIX),
-                        data=np.linspace(0, 10, num_samples).astype(np.float64),
-                    )
-                    grp.create_dataset(
-                        S.ds(group_name, S.POSITION_SUFFIX),
-                        data=np.linspace(0, 10, num_samples).astype(np.float64),
-                    )
-                    grp.create_dataset(
-                        S.ds(group_name, S.UNITS_SUFFIX),
-                        data=np.array(["m", "m/s", "A", "V"], dtype=object),
-                    )
-                    grp.create_dataset(
-                        S.ds(group_name, S.NAMES_SUFFIX),
-                        data=np.array(["position", "velocity", "current", "voltage"], dtype=object),
-                    )
+                    values = rng.randn(num_signals, max_samples).astype(np.float64)
+                    grp.create_dataset(S.ds(group_name, S.VALUE_SUFFIX), data=values)
+                    grp.create_dataset(S.ds(group_name, S.TIME_SUFFIX), data=start_times)
+                    grp.create_dataset(S.ds(group_name, S.SAMPLING_FREQ_SUFFIX), data=samp_freqs)
+                    grp.create_dataset(S.ds(group_name, S.NAMES_SUFFIX), data=names)
+                    grp.create_dataset(S.ds(group_name, S.UNITS_SUFFIX), data=units)
+                    # First group → Type A
+                    if group_name == S.GROUP_NAMES[0]:
+                        grp.create_dataset(S.ds(group_name, S.NSAMPLE_SUFFIX), data=nsample_a)
         except Exception as e:
             raise IOError(f"Failed to create HDF5 test file at {file_path}: {e}") from e
     else:
-        mock_file = MockHDF5File(file_path, mode="w")
-        mock_file._load_mock_data()
+        # No h5py: create a marker file so HDF5Reader falls back to MockHDF5File
+        Path(file_path).touch()
 
+
+# ---------------------------------------------------------------------------
+# HDF5Reader
+# ---------------------------------------------------------------------------
 
 class HDF5Reader:
     """
@@ -157,6 +193,10 @@ class HDF5Reader:
 
     Reads only the groups listed in HDF5Schema.GROUP_NAMES.
     Dataset names are built from group_name + suffix.
+
+    Supports two batch types:
+      Type A – _NS dataset present → per-signal valid sample counts
+      Type B – _NS dataset absent  → full rectangular value matrix
     """
 
     def __init__(self, file_path: str):
@@ -187,6 +227,10 @@ class HDF5Reader:
         else:
             return MockHDF5File(str(self.file_path), "r")
 
+    # ------------------------------------------------------------------
+    # Group discovery
+    # ------------------------------------------------------------------
+
     def get_groups(self) -> List[str]:
         """
         Get list of configured group names that exist in the file.
@@ -203,13 +247,16 @@ class HDF5Reader:
         with self._lock:
             with self._open_file() as f:
                 file_keys = list(f.keys())
-                # Return only configured groups that exist in the file
                 self._groups_cache = [g for g in S.GROUP_NAMES if g in file_keys]
 
         return self._groups_cache
 
-    # Keep backward-compatible alias
+    # Backward-compatible alias
     get_batches = get_groups
+
+    # ------------------------------------------------------------------
+    # Metadata
+    # ------------------------------------------------------------------
 
     def get_group_metadata(self, group_name: str) -> Dict:
         """
@@ -221,9 +268,11 @@ class HDF5Reader:
         Returns:
             Dictionary with:
               - signal_count: int
-              - sample_count: int
+              - sample_count: int  (max column width of value matrix)
               - signal_names: List[str]
               - units: List[str]
+              - batch_type: str  ("A" or "B")
+              - n_samples: Optional[List[int]]  (per-signal counts for Type A)
 
         Raises:
             ValueError: If group does not exist or is missing required datasets
@@ -234,6 +283,7 @@ class HDF5Reader:
         ds_values = S.ds(group_name, S.VALUE_SUFFIX)
         ds_names = S.ds(group_name, S.NAMES_SUFFIX)
         ds_units = S.ds(group_name, S.UNITS_SUFFIX)
+        ds_nsample = S.ds(group_name, S.NSAMPLE_SUFFIX)
 
         with self._lock:
             with self._open_file() as f:
@@ -250,6 +300,7 @@ class HDF5Reader:
 
                 signal_count = group[ds_values].shape[0]
                 sample_count = group[ds_values].shape[1]
+
                 signal_names = [
                     n.decode("utf-8") if isinstance(n, bytes) else str(n)
                     for n in group[ds_names][:]
@@ -259,42 +310,62 @@ class HDF5Reader:
                     for u in group[ds_units][:]
                 ] if ds_units in group else [""] * signal_count
 
+                # Determine batch type
+                if ds_nsample in group:
+                    batch_type = "A"
+                    n_samples = [int(v) for v in group[ds_nsample][:]]
+                else:
+                    batch_type = "B"
+                    n_samples = None
+
                 metadata = {
                     "signal_count": signal_count,
                     "sample_count": sample_count,
                     "signal_names": signal_names,
                     "units": units,
+                    "batch_type": batch_type,
+                    "n_samples": n_samples,
                 }
 
                 self._metadata_cache[group_name] = metadata
 
         return metadata
 
-    # Keep backward-compatible alias
+    # Backward-compatible alias
     get_batch_metadata = get_group_metadata
+
+    # ------------------------------------------------------------------
+    # Signal loading
+    # ------------------------------------------------------------------
 
     def load_signal(
         self,
         group_name: str,
         signal_index: int,
-        start: int = 0,
-        end: Optional[int] = None,
     ) -> Tuple[np.ndarray, np.ndarray]:
         """
-        Load a single signal row with optional slicing.
+        Load a single signal with constructed time vector.
+
+        Type A (n_sample dataset exists):
+            signal = values[idx, :n_sample[idx]]
+        Type B (no n_sample dataset):
+            signal = values[idx, :]
+
+        Time is always constructed:
+            t0 = time_dataset[idx]
+            fs = freq_dataset[idx]
+            time = t0 + arange(length) / fs
 
         Args:
             group_name: Name of the HDF5 group
             signal_index: Index of signal (0-based)
-            start: Start sample index (inclusive)
-            end: End sample index (exclusive), None for all
 
         Returns:
             Tuple of (time_array, signal_values)
 
         Raises:
             ValueError: If group or signal index invalid
-            IndexError: If indices out of range
+            IndexError: If signal index out of range
         """
         metadata = self.get_group_metadata(group_name)
 
@@ -306,30 +377,30 @@ class HDF5Reader:
 
         ds_values = S.ds(group_name, S.VALUE_SUFFIX)
         ds_time = S.ds(group_name, S.TIME_SUFFIX)
+        ds_fs = S.ds(group_name, S.SAMPLING_FREQ_SUFFIX)
+        ds_nsample = S.ds(group_name, S.NSAMPLE_SUFFIX)
 
         with self._lock:
             with self._open_file() as f:
                 group = f[group_name]
 
-                # Resolve end index
-                if end is None:
-                    end = metadata["sample_count"]
-                elif end > metadata["sample_count"]:
-                    raise IndexError(
-                        f"end ({end}) exceeds sample count ({metadata['sample_count']})"
-                    )
-
-                # Load time array (may be per-signal or shared)
-                time_array = group[ds_time][:]
-                if len(time_array.shape) == 2:
-                    time_data = time_array[signal_index, start:end]
+                # Determine valid sample count
+                if ds_nsample in group:
+                    n = int(group[ds_nsample][signal_index])
                 else:
-                    time_data = time_array[start:end]
+                    n = metadata["sample_count"]
 
-                # Load single signal row (lazy slice)
-                signal_data = group[ds_values][signal_index, start:end]
+                # Read signal values (only valid portion)
+                signal_data = group[ds_values][signal_index, :n].astype(np.float64)
 
-        return time_data.astype(np.float64), signal_data.astype(np.float64)
+                # Read per-signal time parameters
+                t0 = float(group[ds_time][signal_index])
+                fs = float(group[ds_fs][signal_index])
+
+        # Construct time vector
+        time_data = t0 + np.arange(n, dtype=np.float64) / fs
+
+        return time_data, signal_data
 
     def load_signal_by_name(
         self, group_name: str, signal_name: str
@@ -358,9 +429,13 @@ class HDF5Reader:
 
         return self.load_signal(group_name, signal_index)
 
+    # ------------------------------------------------------------------
+    # Statistics
+    # ------------------------------------------------------------------
+
     def get_signal_stats(self, group_name: str, signal_index: int) -> Dict:
         """
-        Get statistical summary of a signal without loading all data.
+        Get statistical summary of a signal (respects n_sample truncation).
 
         Args:
             group_name: Name of the HDF5 group
@@ -375,11 +450,19 @@ class HDF5Reader:
             raise IndexError(f"Signal index {signal_index} out of range")
 
         ds_values = S.ds(group_name, S.VALUE_SUFFIX)
+        ds_nsample = S.ds(group_name, S.NSAMPLE_SUFFIX)
 
         with self._lock:
             with self._open_file() as f:
                 group = f[group_name]
-                signal_data = group[ds_values][signal_index, :]
+
+                # Determine valid length
+                if ds_nsample in group:
+                    n = int(group[ds_nsample][signal_index])
+                else:
+                    n = metadata["sample_count"]
+
+                signal_data = group[ds_values][signal_index, :n]
 
         return {
             "mean": float(np.mean(signal_data)),
@@ -387,8 +470,12 @@ class HDF5Reader:
             "min": float(np.min(signal_data)),
             "max": float(np.max(signal_data)),
             "median": float(np.median(signal_data)),
-            "samples": len(signal_data),
+            "samples": n,
         }
+
+    # ------------------------------------------------------------------
+    # Lifecycle
+    # ------------------------------------------------------------------
 
     def close(self) -> None:
         """Close the file handle and cleanup resources."""
