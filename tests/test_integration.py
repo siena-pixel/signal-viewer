@@ -236,6 +236,60 @@ class TestBatchesAndSignals(IntegrationTestBase):
         # Downsampled to ~100 points
         self.assertLess(len(response['values']), 200)
 
+    def test_get_signal_with_time_window(self):
+        """Test signal loading with t_min/t_max time window parameters."""
+        file_path = self.file_paths['SN001']['p001_test']['run_1']
+        encoded = self.encode_file_path(file_path)
+
+        # First load full signal to get time extent
+        full = self.get_json(
+            f'/api/files/{encoded}/batches/{S.DEFAULT_GROUP}/signals/0'
+        )
+        t_start = full['t_start']
+        t_end = full['t_end']
+        total = full['total_samples']
+
+        # Request a ~50% window in the middle
+        mid = (t_start + t_end) / 2
+        quarter = (t_end - t_start) / 4
+        t_min = mid - quarter
+        t_max = mid + quarter
+
+        windowed = self.get_json(
+            f'/api/files/{encoded}/batches/{S.DEFAULT_GROUP}/signals/0'
+            f'?t_min={t_min}&t_max={t_max}'
+        )
+
+        self.assertIn('time', windowed)
+        self.assertIn('values', windowed)
+        self.assertTrue(windowed['windowed'])
+        # Windowed result should have fewer samples than full signal
+        self.assertLess(len(windowed['values']), total)
+        # total_samples should still report the FULL signal length
+        self.assertEqual(windowed['total_samples'], total)
+
+    def test_get_signal_windowed_with_downsampling(self):
+        """Test time-windowed signal with additional downsampling."""
+        file_path = self.file_paths['SN001']['p001_test']['run_1']
+        encoded = self.encode_file_path(file_path)
+
+        full = self.get_json(
+            f'/api/files/{encoded}/batches/{S.DEFAULT_GROUP}/signals/0'
+        )
+        t_start = full['t_start']
+        t_end = full['t_end']
+
+        windowed = self.get_json(
+            f'/api/files/{encoded}/batches/{S.DEFAULT_GROUP}/signals/0'
+            f'?t_min={t_start}&t_max={t_end}&downsample=50'
+        )
+
+        self.assertIn('time', windowed)
+        self.assertIn('values', windowed)
+        self.assertEqual(len(windowed['time']), len(windowed['values']))
+        # Should be downsampled to roughly 50 points
+        self.assertLessEqual(len(windowed['values']), 100)
+
     def test_get_signal_invalid_index(self):
         """Test GET /api/files/{encoded}/batches/{batch}/signals/{idx} with bad index."""
         file_path = self.file_paths['SN001']['p001_test']['run_1']

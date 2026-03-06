@@ -22,35 +22,49 @@ pip install -r requirements.txt</code></pre>
 
       <h3>Setup</h3>
       <p>Set the HDF5 data root directory:</p>
-      <pre><code>export DATA_ROOT=/path/to/hdf5/files</code></pre>
+      <pre><code>export SIGNAL_VIEWER_DATA_ROOT=/path/to/hdf5/files</code></pre>
       <p>Start the development server:</p>
       <pre><code>python -m signal_viewer.server.app</code></pre>
-      <p>Open your browser and navigate to <code>http://localhost:8000</code></p>
+      <p>Open your browser and navigate to <code>http://127.0.0.1:8050</code></p>
     </details>
 
     <details>
       <summary><h2>Data Format</h2></summary>
-      <h3>HDF5 Structure</h3>
-      <p>Signal Viewer expects HDF5 files organized as follows:</p>
-      <pre><code>DATA_ROOT/
-├── serial_name/
-│   ├── step_001/
-│   │   └── batch_file.h5
-│   │       ├── batch_001/
-│   │       │   ├── signal_000
-│   │       │   ├── signal_001
-│   │       │   └── ...
-│   │       └── batch_002/
-│   └── step_002/
-└── other_serial/</code></pre>
+      <h3>Directory Structure</h3>
+      <p>Signal Viewer expects HDF5 files in a three-level directory hierarchy:</p>
+      <pre><code>SIGNAL_VIEWER_DATA_ROOT/
+├── SN001/                      # serial (prefix SN*)
+│   ├── p001_motor_test/        # folder_1 (pattern pXXX_*)
+│   │   ├── run_nominal/        # folder_2 (any name)
+│   │   │   └── data.h5
+│   │   └── run_overload/
+│   │       └── data.h5
+│   └── p002_vibration/
+└── SN002/</code></pre>
 
-      <h3>Signal Requirements</h3>
+      <h3>HDF5 Internal Structure</h3>
+      <p>Each <code>.h5</code> file contains one or more groups (batches) with dataset suffixes:</p>
+      <pre><code>data.h5
+├── GROUP_T0/
+│   ├── GROUP_T0_V    (2D float64) signal values [M signals × N samples]
+│   ├── GROUP_T0_TIM  (1D float64) epoch ms of first sample per signal [M]
+│   ├── GROUP_T0_FRE  (1D float64) sampling frequency in Hz [M]
+│   ├── GROUP_T0_SAM  (1D int64)   valid sample count per signal [M]
+│   ├── GROUP_T0_N    (1D string)  signal names [M]
+│   ├── GROUP_T0_UNI  (1D string)  signal units [M]
+│   ├── GROUP_T0_ERR  (2D, optional — Type B only)
+│   ├── GROUP_T0_SQI  (1D, optional — Type B only)
+│   └── GROUP_T0_TLS  (1D, optional — Type B only)
+└── GROUP_T1/
+    └── ...</code></pre>
+
+      <h3>Signal Types</h3>
+      <p>The reader supports two signal types, detected automatically per batch:</p>
       <ul>
-        <li>Signals stored as HDF5 datasets within batch groups</li>
-        <li>Each signal is a 1D float array (time series data)</li>
-        <li>Metadata attributes optional: <code>units</code>, <code>sample_rate</code>, <code>description</code></li>
-        <li>Supported file extensions: <code>.h5</code>, <code>.hdf5</code></li>
+        <li><strong>Type A</strong> (standard): signal datasets only. Truncated by the <code>_SAM</code> (n_samples) attribute. Time is constructed as <code>t0 + i &times; (1000 / fs)</code> ms.</li>
+        <li><strong>Type B</strong> (extended): signal datasets alongside <code>_ERR</code>, <code>_SQI</code>, <code>_TLS</code> companion datasets. Also truncated by <code>_SAM</code>. Time constructed identically.</li>
       </ul>
+      <p>Each signal is a row in the <code>_V</code> matrix, truncated to <code>_SAM</code> samples. Signal names and units are read from the <code>_N</code> and <code>_UNI</code> datasets. Supported file extensions: <code>.h5</code>, <code>.hdf5</code>.</p>
     </details>
 
     <details>
@@ -66,9 +80,9 @@ pip install -r requirements.txt</code></pre>
       <h3>Sidebar Navigation</h3>
       <p>The left sidebar displays available signals from the selected file:</p>
       <ul>
-        <li>Click a signal to view it</li>
-        <li>Signals are numbered (signal_000, signal_001, etc.)</li>
-        <li>Batch information displayed for context</li>
+        <li>Click a signal name to load it into the viewer</li>
+        <li>Signals are grouped by batch (e.g. GROUP_T0, GROUP_T1)</li>
+        <li>Signal names and units come from the HDF5 metadata</li>
       </ul>
 
       <h3>Main Navigation</h3>
@@ -84,28 +98,34 @@ pip install -r requirements.txt</code></pre>
     <details>
       <summary><h2>Viewer</h2></summary>
       <h3>Display Modes</h3>
-      <p>The viewer supports multiple visualization modes:</p>
+      <p>The viewer supports two layout modes, selectable from the <strong>Layout</strong> dropdown:</p>
       <ul>
-        <li><strong>Overlay Mode</strong>: Stack up to 5 signals on the same plot</li>
-        <li><strong>Subplot Mode</strong>: Display each signal in a separate subplot</li>
+        <li><strong>Same Axis (Overlay)</strong>: All signals share one set of axes. When a single signal is loaded the y-axis shows its units; with multiple signals it shows "Value".</li>
+        <li><strong>Subplots</strong>: Each signal gets its own subplot with an independent y-axis labelled with the signal's units. All subplots share the same time range.</li>
       </ul>
+      <p>Switching layout mode while zoomed automatically reloads the full overview data so the signal is always displayed correctly.</p>
 
       <h3>Signal Cards</h3>
-      <p>Each loaded signal displays a card with:</p>
+      <p>Each loaded signal displays a card in the header bar with:</p>
       <ul>
-        <li>Signal name and metadata</li>
-        <li>Basic statistics (min, max, mean, std)</li>
-        <li>Remove button to unload the signal</li>
-        <li>Visual indicator showing signal color in plot</li>
+        <li>Batch name and signal name (colour-coded to match the plot trace)</li>
+        <li>Live hover readout: value, timestamp, and estimated full-signal sample index</li>
+        <li>Point count ratio (displayed points / total samples)</li>
+        <li>Remove button (&times;) to unload the signal</li>
       </ul>
 
-      <h3>Interactive Features</h3>
+      <h3>Adaptive Zoom</h3>
+      <p>The viewer uses an adaptive zoom system that re-fetches data from the server at higher resolution whenever you zoom in:</p>
       <ul>
-        <li><strong>Hover Information</strong>: Display data values and coordinates on hover</li>
-        <li><strong>Zoom</strong>: Click and drag to zoom into regions of interest</li>
-        <li><strong>Pan</strong>: Hold shift and drag to pan across the signal</li>
-        <li><strong>Reset View</strong>: Double-click to reset zoom/pan</li>
+        <li><strong>Zoom</strong>: Click and drag to select a region. After a short debounce, the server returns up to 5,000 points for just the visible window, giving pixel-level detail at any zoom depth.</li>
+        <li><strong>Pan</strong>: Hold shift and drag to pan across the signal.</li>
+        <li><strong>Reset zoom</strong>: Three ways to return to the full overview &mdash; the house icon (<span style="font-family:monospace">&#x2302;</span>) in the toolbar, the "Reset Zoom" button in the header, or double-clicking the plot.</li>
+        <li><strong>Zoom indicator</strong>: While zoomed, a badge shows what percentage of the full signal is visible, and a "Refining…" label appears briefly while new data loads.</li>
       </ul>
+      <p>The server uses a two-pass MinMax-LTTB downsampling algorithm that preserves visual shape while keeping the point count low. A 5 % margin is fetched beyond the visible edges to avoid low-resolution strips when panning slightly.</p>
+
+      <h3>Hover Crosshair</h3>
+      <p>In subplot mode, hovering over any subplot draws a synchronised vertical crosshair across all subplots and updates every signal card with the interpolated value at that time.</p>
 
       <h3>Signal Limit</h3>
       <p>Up to 5 signals can be loaded simultaneously to maintain performance. Remove signals as needed to load new ones.</p>
@@ -113,8 +133,10 @@ pip install -r requirements.txt</code></pre>
 
     <details>
       <summary><h2>Analysis</h2></summary>
+      <p>Click a signal in the sidebar to run a full analysis. The page works with one signal at a time.</p>
+
       <h3>Statistics</h3>
-      <p>Detailed statistical analysis of loaded signals:</p>
+      <p>Descriptive statistics for the selected signal:</p>
       <ul>
         <li><strong>Descriptive Stats</strong>: Min, max, mean, standard deviation, median</li>
         <li><strong>Distribution</strong>: Histogram showing value distribution</li>
@@ -122,27 +144,28 @@ pip install -r requirements.txt</code></pre>
       </ul>
 
       <h3>Rainflow Cycle Counting</h3>
-      <p>Identifies stress cycles in the signal data using the standard rainflow algorithm:</p>
+      <p>Identifies stress cycles using the four-point rainflow algorithm:</p>
       <ul>
-        <li>Detects local minima and maxima</li>
-        <li>Counts cycles and calculates range for each cycle</li>
-        <li>Useful for fatigue analysis and life prediction</li>
-        <li>Results displayed in summary table and histogram</li>
+        <li>Counts full and half cycles with range calculations</li>
+        <li>Percentile table showing range distribution</li>
+        <li>Range histogram with configurable bin count</li>
+        <li>Exceedance curves (range, cycle max, cycle min) for fatigue analysis</li>
       </ul>
 
-      <h3>Histogram</h3>
-      <p>Visualizes the distribution of signal values:</p>
+      <h3>Value Histogram</h3>
+      <p>Visualizes the distribution of the selected signal's values:</p>
       <ul>
         <li>Automatically determines appropriate bin sizing</li>
         <li>Shows frequency of values in each bin</li>
-        <li>Supports overlay of multiple signal histograms</li>
       </ul>
     </details>
 
     <details>
       <summary><h2>Comparison</h2></summary>
+      <p>Click signals in the sidebar to assign them: first click = Signal A, second click = Signal B. Four comparison views are generated automatically:</p>
+
       <h3>Overlay Comparison</h3>
-      <p>Display two signals on the same plot to compare waveforms directly. Useful for:</p>
+      <p>Both signals on the same time axis to compare waveforms directly. Useful for:</p>
       <ul>
         <li>Comparing signals from different test conditions</li>
         <li>Identifying differences in amplitude and phase</li>
@@ -171,13 +194,6 @@ pip install -r requirements.txt</code></pre>
         <li>Quantifies correlation strength (-1 to +1)</li>
         <li>Useful for signal synchronization analysis</li>
       </ul>
-
-      <h3>Signal Chips</h3>
-      <p>Extract and compare corresponding segments from two signals:</p>
-      <ul>
-        <li>Select time range of interest</li>
-        <li>View zoomed-in details of matched segments</li>
-      </ul>
     </details>
 
 
@@ -193,19 +209,22 @@ pip install -r requirements.txt</code></pre>
       <h3>Data Endpoints</h3>
       <ul>
         <li><code>GET /api/files/{file}/batches</code> - List batches in a file</li>
-        <li><code>GET /api/files/{file}/batches/{batch}/meta</code> - Get batch metadata</li>
-        <li><code>GET /api/files/{file}/batches/{batch}/signals/{index}</code> - Get signal data</li>
+        <li><code>GET /api/files/{file}/batches/{batch}/meta</code> - Get batch metadata (signal names, units)</li>
+        <li><code>GET /api/files/{file}/batches/{batch}/signals/{index}</code> - Get signal data.
+          Supports optional query parameters:
+          <ul>
+            <li><code>downsample=N</code> - Target point count (default: full signal, max 10,000). Uses MinMax-LTTB downsampling.</li>
+            <li><code>t_min=&lt;epoch_ms&gt;</code> &amp; <code>t_max=&lt;epoch_ms&gt;</code> - Time window slice. The server binary-searches the cached signal and returns only the matching segment. Combine with <code>downsample</code> for adaptive zoom.</li>
+          </ul>
+          Response includes <code>total_samples</code>, <code>t_start</code>, <code>t_end</code> (full signal extent) and <code>windowed</code> (boolean) alongside the <code>time</code> and <code>values</code> arrays.
+        </li>
       </ul>
 
       <h3>Analysis Endpoints</h3>
       <ul>
-        <li><code>POST /api/analysis/stats</code> - Calculate statistics</li>
-        <li><code>POST /api/analysis/fft</code> - Compute FFT</li>
-        <li><code>POST /api/analysis/psd</code> - Compute power spectral density</li>
-        <li><code>POST /api/analysis/filter</code> - Apply signal filters</li>
-        <li><code>POST /api/analysis/correlation</code> - Calculate cross-correlation</li>
-        <li><code>POST /api/analysis/trend</code> - Analyze signal trends</li>
-        <li><code>POST /api/analysis/anomaly</code> - Detect anomalies</li>
+        <li><code>POST /api/analysis/stats</code> - Descriptive statistics and rainflow cycle counting</li>
+        <li><code>POST /api/analysis/correlation</code> - Cross-correlation between two signals</li>
+        <li><code>POST /api/analysis/trend</code> - Polynomial trend fitting</li>
       </ul>
 
       <h3>Cache Endpoints</h3>
@@ -216,17 +235,24 @@ pip install -r requirements.txt</code></pre>
     </details>
 
     <details>
-      <summary><h2>Keyboard Shortcuts</h2></summary>
-      <h3>Plotting Controls</h3>
+      <summary><h2>Keyboard &amp; Mouse Controls</h2></summary>
+      <h3>Plot Interactions</h3>
       <ul>
-        <li><strong>Click and drag</strong> - Zoom into region</li>
-        <li><strong>Shift + Click and drag</strong> - Pan across plot</li>
-        <li><strong>Double-click</strong> - Reset zoom/pan</li>
-        <li><strong>Scroll wheel</strong> - Zoom in/out</li>
-        <li><strong>Right-click</strong> - Context menu (save image, etc.)</li>
+        <li><strong>Click and drag</strong> - Zoom into selected region (triggers adaptive data reload)</li>
+        <li><strong>Shift + Click and drag</strong> - Pan across the plot</li>
+        <li><strong>Double-click</strong> - Reset to full signal overview</li>
+        <li><strong>House icon (toolbar)</strong> - Reset zoom to full overview</li>
       </ul>
 
-      <h3>Navigation</h3>
+      <h3>Toolbar Buttons</h3>
+      <ul>
+        <li><strong>Zoom</strong> / <strong>Pan</strong> - Toggle drag mode</li>
+        <li><strong>Zoom in</strong> / <strong>Zoom out</strong> - Incremental zoom</li>
+        <li><strong>House icon</strong> - Reset zoom (full signal)</li>
+        <li><strong>Camera icon</strong> - Download plot as PNG</li>
+      </ul>
+
+      <h3>Page Navigation</h3>
       <ul>
         <li><strong>Alt + V</strong> - Go to Viewer (on supported browsers)</li>
         <li><strong>Alt + A</strong> - Go to Analysis</li>
@@ -241,35 +267,34 @@ pip install -r requirements.txt</code></pre>
       <p>Configure the application using environment variables:</p>
 
       <ul>
-        <li><code>DATA_ROOT</code> - Root directory containing HDF5 files (required)
-          <br><code>Default: ./data</code></li>
+        <li><code>SIGNAL_VIEWER_DATA_ROOT</code> - Root directory containing HDF5 files
+          <br><code>Default: &lt;project&gt;/data/</code></li>
 
-        <li><code>DEBUG</code> - Enable debug mode for development
-          <br><code>Default: False</code>
-          <br><code>Usage: export DEBUG=True</code></li>
+        <li><code>SIGNAL_VIEWER_HOST</code> - Server bind address
+          <br><code>Default: 127.0.0.1</code>
+          <br><code>Usage: export SIGNAL_VIEWER_HOST=0.0.0.0</code></li>
 
-        <li><code>HOST</code> - Server host address
-          <br><code>Default: localhost</code>
-          <br><code>Usage: export HOST=0.0.0.0</code></li>
+        <li><code>SIGNAL_VIEWER_PORT</code> - Server port number
+          <br><code>Default: 8050</code>
+          <br><code>Usage: export SIGNAL_VIEWER_PORT=9000</code></li>
 
-        <li><code>PORT</code> - Server port number
-          <br><code>Default: 8000</code>
-          <br><code>Usage: export PORT=8080</code></li>
+        <li><code>SIGNAL_VIEWER_DEBUG</code> - Enable debug mode (auto-reload)
+          <br><code>Default: true</code>
+          <br><code>Usage: export SIGNAL_VIEWER_DEBUG=false</code></li>
 
-        <li><code>CACHE_MAX_MEMORY_MB</code> - Signal cache size in MB
-          <br><code>Default: 512</code>
-          <br><code>Usage: export CACHE_MAX_MEMORY_MB=1024</code></li>
+        <li><code>SIGNAL_VIEWER_VERBOSE</code> - Log detailed tracebacks for every error
+          <br><code>Default: false</code></li>
 
-        <li><code>CACHE_CLEANUP_INTERVAL</code> - Cache cleanup interval in seconds
-          <br><code>Default: 300</code></li>
+        <li><code>SIGNAL_VIEWER_CACHE_MB</code> - Signal cache budget in MB
+          <br><code>Default: 500</code>
+          <br><code>Usage: export SIGNAL_VIEWER_CACHE_MB=1024</code></li>
       </ul>
 
       <h3>Example Configuration</h3>
-      <pre><code>export DATA_ROOT=/data/hdf5_signals
-export DEBUG=True
-export HOST=0.0.0.0
-export PORT=8080
-export CACHE_MAX_MEMORY_MB=1024</code></pre>
+      <pre><code>export SIGNAL_VIEWER_DATA_ROOT=/data/hdf5_signals
+export SIGNAL_VIEWER_HOST=0.0.0.0
+export SIGNAL_VIEWER_PORT=8050
+export SIGNAL_VIEWER_CACHE_MB=1024</code></pre>
     </details>
 
     <details>
@@ -277,8 +302,8 @@ export CACHE_MAX_MEMORY_MB=1024</code></pre>
       <h3>No Serials Appearing</h3>
       <p><strong>Problem:</strong> Serial dropdown is empty after server starts.</p>
       <ul>
-        <li>Verify <code>DATA_ROOT</code> environment variable is set correctly</li>
-        <li>Check that HDF5 files exist in <code>DATA_ROOT</code></li>
+        <li>Verify <code>SIGNAL_VIEWER_DATA_ROOT</code> environment variable is set correctly</li>
+        <li>Check that HDF5 files exist in the data root directory</li>
         <li>Ensure directory permissions allow reading</li>
         <li>Check server logs for errors: <code>python -m signal_viewer.server.app</code></li>
       </ul>
@@ -295,7 +320,7 @@ export CACHE_MAX_MEMORY_MB=1024</code></pre>
       <h3>Out of Memory</h3>
       <p><strong>Problem:</strong> "Cache limit exceeded" error when loading signals.</p>
       <ul>
-        <li>Increase <code>CACHE_MAX_MEMORY_MB</code> environment variable</li>
+        <li>Increase <code>SIGNAL_VIEWER_CACHE_MB</code> environment variable</li>
         <li>Reduce number of loaded signals (max 5)</li>
         <li>Close browser tabs and restart server</li>
         <li>Check system memory availability</li>
@@ -323,7 +348,7 @@ export CACHE_MAX_MEMORY_MB=1024</code></pre>
       <p><strong>Problem:</strong> Browser console shows CORS errors.</p>
       <ul>
         <li>Ensure server is running and accessible</li>
-        <li>Check that <code>HOST</code> and <code>PORT</code> match browser location</li>
+        <li>Check that <code>SIGNAL_VIEWER_HOST</code> and <code>SIGNAL_VIEWER_PORT</code> match browser location</li>
         <li>If using reverse proxy, verify CORS headers are set correctly</li>
       </ul>
     </details>

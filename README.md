@@ -25,11 +25,13 @@ A professional web-based tool for exploring, visualizing, and analyzing time-ser
 ## Features
 
 - **Data Explorer**: Browse hierarchical HDF5 structure (Serial → Step → Files)
-- **Signal Viewer**: Interactive time-series plots with zoom, pan, and downsampling
+- **Signal Viewer**: Interactive time-series plots with two layout modes (overlay / subplots)
+- **Adaptive Zoom**: Click-drag zoom re-fetches data from the server at higher resolution, giving pixel-level detail at any zoom depth without sending the full signal to the browser
 - **Statistical Insights**: Descriptive stats, rolling statistics, rainflow cycle counting
 - **Trend Analysis**: Polynomial fitting, envelope estimation, RMS trends
 - **Correlation**: Cross-correlation and coherence analysis
-- **Performance**: Efficient caching and LTTB downsampling for large datasets
+- **Performance**: In-memory LRU signal cache, MinMax-LTTB two-pass downsampling, binary-search windowed queries
+- **Signal Types**: Supports Type A (standard) and Type B (extended with error/SQI/TLS) signals, both auto-detected per batch
 - **Responsive UI**: Works on desktop and tablets
 - **CORS-Enabled API**: RESTful endpoints for integration with external tools
 
@@ -112,6 +114,10 @@ file.h5
 │   │   - N: number of samples per signal
 │   ├── GROUP_T0_N (1D array, string): Signal names [M]
 │   ├── GROUP_T0_U (1D array, string): Signal units [M]
+│   ├── GROUP_T0_SAM (scalar, int):    Actual sample count (truncation length)
+│   ├── GROUP_T0_ERR (2D, optional):   Error datasets (Type B only)
+│   ├── GROUP_T0_SQI (2D, optional):   Signal Quality Index (Type B only)
+│   └── GROUP_T0_TLS (2D, optional):   Tolerance datasets (Type B only)
 ├── GROUP_T1
 │   └── ...
 ```
@@ -122,6 +128,14 @@ Dataset names are built as: `GROUP_NAME + suffix`
 - `_P`: Positions (corrected time)
 - `_N`: Signal names
 - `_U`: Signal units
+- `_SAM`: Number of valid samples (all signals truncated to this length)
+
+### Signal Types
+
+The reader auto-detects the signal type per batch:
+
+- **Type A** (standard): Only signal datasets present. Truncated by `_SAM`. Time is constructed as `t0 + i × (1000 / fs)` ms.
+- **Type B** (extended): Signal datasets alongside `_ERR`, `_SQI`, `_TLS` companion datasets. Also truncated by `_SAM`. Time constructed identically.
 
 ### Example with h5py
 
@@ -172,7 +186,7 @@ signal_viewer/
 │   ├── statistics.py   # Descriptive stats, rainflow
 │   ├── correlation.py  # Cross-correlation, coherence
 │   ├── trend.py        # Polynomial fitting, envelopes
-│   └── resampling.py   # LTTB downsampling
+│   └── resampling.py   # MinMax-LTTB two-pass downsampling
 ├── templates/          # Jinja2 HTML templates
 └── visualization/      # Client-side plotting (JavaScript)
 ```
@@ -192,10 +206,15 @@ GET /api/files/{encoded_path}/batches/{group}/meta  # Group metadata
 ### Signal Loading
 
 ```
-GET /api/files/{encoded_path}/batches/{group}/signals/{idx}?downsample=2000
+GET /api/files/{encoded_path}/batches/{group}/signals/{idx}
+    ?downsample=N              # target point count (default: full, max 10000)
+    &t_min=<epoch_ms>          # left edge of visible window (adaptive zoom)
+    &t_max=<epoch_ms>          # right edge of visible window (adaptive zoom)
 ```
 
-Returns: `{time, values, name, units, samples}`
+Returns: `{time, values, name, units, samples, total_samples, t_start, t_end, windowed}`
+
+When `t_min`/`t_max` are given, the server binary-searches the cached signal and returns only the matching segment. Combine with `downsample` for adaptive zoom — the browser gets pixel-level detail at any zoom depth while never exceeding N points.
 
 ### Analysis Endpoints (POST)
 
@@ -260,10 +279,10 @@ See `requirements.txt` for exact versions.
 
 ## Performance Tips
 
-1. **Caching**: Configure `SIGNAL_VIEWER_CACHE_MB` based on available RAM
-2. **Downsampling**: Use `?downsample=N` parameter for large signals (>100k samples)
-3. **Batch Loading**: Process data in batches rather than loading entire files
-4. **Analysis**: Use correlation and trend analysis server-side before visualization
+1. **Caching**: Configure `SIGNAL_VIEWER_CACHE_MB` based on available RAM — the LRU cache keeps full signals in memory so repeated zoom queries avoid disk I/O
+2. **Adaptive Zoom**: The viewer automatically re-fetches at higher resolution when you zoom in; no manual `downsample` tuning needed for interactive use
+3. **Downsampling**: For API consumers, use `?downsample=N` and `?t_min=…&t_max=…` to control the point count and window
+4. **Analysis**: Correlation and trend computations run in a thread-pool executor so the server stays responsive during heavy queries
 
 ## License
 

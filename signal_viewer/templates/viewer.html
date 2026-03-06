@@ -144,18 +144,11 @@ function _tickLabel(ms, step) {
   const ms_ = d.getUTCMilliseconds();
 
   if (step >= 86400000) {
-    // Day-level ticks: show date
     return `${d.getUTCFullYear()}/${pad(d.getUTCMonth()+1)}/${pad(d.getUTCDate())}`;
   }
-  if (step >= 60000) {
-    // Minute-level: H:M:S
-    return `${H}:${M}:${S}`;
-  }
   if (step >= 1000) {
-    // Second-level: H:M:S
     return `${H}:${M}:${S}`;
   }
-  // Sub-second: H:M:S.mmm
   return `${H}:${M}:${S}.${String(ms_).padStart(3, '0')}`;
 }
 
@@ -477,28 +470,6 @@ function plotSubplots(el) {
 // ============================================================================
 
 /**
- * Read the CURRENT visible x-axis range from Plotly's internal state.
- * Scans ALL x-axes (primary + secondary) because without matches:'x',
- * each subplot axis is independent. Returns the first valid range found.
- * With type:'linear', ax.range is always plain numbers (epoch ms).
- * Returns { tMin, tMax } or null.
- */
-function _getVisibleRange() {
-  if (!_plotEl || !_plotEl._fullLayout) return null;
-  const fl = _plotEl._fullLayout;
-  // Check primary first, then secondary axes
-  for (const key of Object.keys(fl)) {
-    if (!/^xaxis\d*$/.test(key)) continue;
-    const ax = fl[key];
-    if (!ax || !ax.range || ax.range.length < 2) continue;
-    const tMin = Number(ax.range[0]);
-    const tMax = Number(ax.range[1]);
-    if (isFinite(tMin) && isFinite(tMax) && tMin < tMax) return { tMin, tMax };
-  }
-  return null;
-}
-
-/**
  * Force a full-overview reset: cancel any in-flight zoom, fetch overview,
  * and re-render with the complete signal.
  *
@@ -603,7 +574,6 @@ function onRelayout(eventData) {
     return;
   }
 
-  console.log('[Zoom] relayout detected:', { tMin, tMax, keys: keys.join(',') });
   _scheduleZoomFetch(tMin, tMax);
 }
 
@@ -780,7 +750,7 @@ function _reactPlot(tMin, tMax) {
       yaxis: {
         ...PLOT_CONFIG.axis,
         title: { text: (signals.length === 1 && signals[0].units)
-          ? fmtHtml(signals[0].name) + ' (' + fmtHtml(signals[0].units) + ')'
+          ? fmtHtml(signals[0].units)
           : 'Value' },
         range: yRange, autorange: false
       },
