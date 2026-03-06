@@ -15,10 +15,10 @@
 // ============================================================================
 
 const APP_CONFIG = {
-  API_TIMEOUT: 30000,
+  API_TIMEOUT: 60000,
   DEFAULT_DECIMALS: 4,
   TOAST_DURATION: 4000,
-  DEFAULT_DOWNSAMPLE: 2000
+  DEFAULT_DOWNSAMPLE: 5000
 };
 
 const SIGNAL_COLORS = [
@@ -27,8 +27,8 @@ const SIGNAL_COLORS = [
 ];
 
 const PLOT_CONFIG = {
-  margin:   { l: 56, r: 20, t: 24, b: 56, autoexpand: false },
-  marginSm: { l: 48, r: 16, t: 24, b: 52, autoexpand: false },
+  margin:   { l: 80, r: 20, t: 24, b: 56, autoexpand: true },
+  marginSm: { l: 64, r: 16, t: 24, b: 52, autoexpand: true },
   axis:     { showgrid: true, gridwidth: 1, gridcolor: 'rgba(0,0,0,0.06)',
               zeroline: false, showline: true, linewidth: 1, linecolor: '#d1d5db' },
   legend:   { bgcolor: 'rgba(255,255,255,0.92)', bordercolor: '#d1d5db',
@@ -50,11 +50,26 @@ const PLOT_CONFIG = {
  * @returns {Promise<object>}
  */
 async function apiFetch(url, options = {}) {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), APP_CONFIG.API_TIMEOUT);
+  const timeoutCtrl = new AbortController();
+  const timeout = setTimeout(() => timeoutCtrl.abort(), APP_CONFIG.API_TIMEOUT);
+
+  // Merge caller's abort signal with our timeout signal
+  const callerSignal = options.signal || null;
+  let mergedSignal;
+  if (callerSignal && typeof AbortSignal.any === 'function') {
+    mergedSignal = AbortSignal.any([callerSignal, timeoutCtrl.signal]);
+  } else if (callerSignal) {
+    // Polyfill: forward caller abort to timeout controller
+    if (callerSignal.aborted) { timeoutCtrl.abort(); }
+    else { callerSignal.addEventListener('abort', () => timeoutCtrl.abort(), { once: true }); }
+    mergedSignal = timeoutCtrl.signal;
+  } else {
+    mergedSignal = timeoutCtrl.signal;
+  }
 
   try {
-    const response = await fetch(url, { ...options, signal: controller.signal });
+    const fetchOpts = { ...options, signal: mergedSignal };
+    const response = await fetch(url, fetchOpts);
 
     if (!response.ok) {
       let msg = `HTTP ${response.status}`;
@@ -65,7 +80,12 @@ async function apiFetch(url, options = {}) {
 
     return await response.json();
   } catch (err) {
-    if (err.name === 'AbortError') throw new Error('Request timeout (exceeded 30 s)');
+    // Re-throw caller-initiated aborts as AbortError (not timeout message)
+    if (callerSignal && callerSignal.aborted) {
+      const e = new DOMException('The operation was aborted.', 'AbortError');
+      throw e;
+    }
+    if (err.name === 'AbortError') throw new Error('Request timeout (exceeded ' + (APP_CONFIG.API_TIMEOUT / 1000) + ' s)');
     throw err;
   } finally {
     clearTimeout(timeout);
@@ -104,16 +124,109 @@ function decodePath(encoded) {
 // 4. LOADING OVERLAY & TOASTS
 // ============================================================================
 
-function showLoading(text = 'Loading\u2026') {
+// ── Progress bar loading overlay ──────────────────────────────────────────
+//
+// Estimated durations per task.  For data-dependent tasks the caller can
+// supply a `hint` object to showLoading() with sizing information so the
+// estimate scales with the actual payload.
+//
+// hint = { signalCount, sampleCount, fileSize }   (all optional)
+//
+// Base estimates (ms) for small / default payloads:
+const _PROGRESS_BASE = {
+  'Restoring session\u2026':    800,
+  'Loading steps\u2026':        300,
+  'Loading files\u2026':        300,
+  'Loading signal list\u2026':  500,
+  'Loading signal\u2026':       2000,   // scaled by sampleCount
+  'Computing statistics\u2026': 1000,   // scaled by sampleCount
+};
+const _PROGRESS_DEFAULT_MS = 1500;
+let _progressTimer = null;
+let _progressStart = 0;
+let _progressEstMs = _PROGRESS_DEFAULT_MS;
+
+/**
+ * Estimate task duration (ms) based on task label and optional size hint.
+ * @param {string} text    task label
+ * @param {object} [hint]  { signalCount, sampleCount, fileSize }
+ * @returns {number} estimated duration in ms
+ */
+function _estimateMs(text, hint) {
+  const base = _PROGRESS_BASE[text] || _PROGRESS_DEFAULT_MS;
+  if (!hint) return base;
+
+  // Signal loading: ~2 s baseline + ~1 ms per 1 000 samples (network + decode)
+  if (text === 'Loading signal\u2026' && hint.sampleCount) {
+    return Math.max(base, 500 + hint.sampleCount / 1000);
+  }
+  // Statistics: similar scaling
+  if (text === 'Computing statistics\u2026' && hint.sampleCount) {
+    return Math.max(base, 400 + hint.sampleCount / 1500);
+  }
+  // Signal list: scales mildly with signal count
+  if (text === 'Loading signal list\u2026' && hint.signalCount) {
+    return Math.max(base, 300 + hint.signalCount * 3);
+  }
+  // File-size based (generic fallback)
+  if (hint.fileSize) {
+    return Math.max(base, 300 + hint.fileSize / (1024 * 50)); // ~1 s per 50 KB
+  }
+  return base;
+}
+
+/**
+ * Show the loading overlay with a progress bar.
+ * @param {string} text   label to display
+ * @param {object} [hint] optional sizing hint for duration estimate
+ */
+function showLoading(text, hint) {
+  if (text === undefined) text = 'Loading\u2026';
   const overlay = document.getElementById('loadingOverlay');
   const textEl  = document.getElementById('loadingText');
-  if (overlay) { overlay.style.display = 'flex'; }
+  const barEl   = document.getElementById('loadingBarFill');
+  if (overlay) { overlay.classList.add('active'); }
   if (textEl)  { textEl.textContent = text; }
+  if (barEl)   { barEl.style.transition = 'none'; barEl.style.width = '0%'; }
+
+  // Start simulated progress
+  _progressEstMs = _estimateMs(text, hint);
+  _progressStart = Date.now();
+  _clearProgressTimer();
+  // Allow the 0% to paint, then start animating
+  requestAnimationFrame(function () {
+    if (barEl) { barEl.style.transition = 'width 0.3s ease'; }
+    _progressTimer = setInterval(_tickProgress, 200);
+  });
 }
 
 function hideLoading() {
-  const overlay = document.getElementById('loadingOverlay');
-  if (overlay) { overlay.style.display = 'none'; }
+  var overlay = document.getElementById('loadingOverlay');
+  var barEl   = document.getElementById('loadingBarFill');
+  _clearProgressTimer();
+  // Snap to 100% briefly before hiding
+  if (barEl) {
+    barEl.style.transition = 'width 0.15s ease';
+    barEl.style.width = '100%';
+  }
+  setTimeout(function () {
+    if (overlay) { overlay.classList.remove('active'); }
+    if (barEl)   { barEl.style.transition = 'none'; barEl.style.width = '0%'; }
+  }, 180);
+}
+
+function _tickProgress() {
+  var barEl = document.getElementById('loadingBarFill');
+  if (!barEl) return;
+  var elapsed = Date.now() - _progressStart;
+  // Asymptotic curve: approaches 90% at estimated time, never reaches 100%
+  var ratio = elapsed / _progressEstMs;
+  var pct = Math.min(90, 90 * (1 - Math.exp(-2.5 * ratio)));
+  barEl.style.width = pct.toFixed(1) + '%';
+}
+
+function _clearProgressTimer() {
+  if (_progressTimer) { clearInterval(_progressTimer); _progressTimer = null; }
 }
 
 function showToast(message, type = 'info', duration = APP_CONFIG.TOAST_DURATION) {
@@ -148,6 +261,14 @@ function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = String(text);
   return div.innerHTML;
+}
+
+/** Escape HTML then convert ^… patterns to <sup> tags.
+ *  Handles ^2, ^-1, ^{2.5}, ^{ab}, etc. */
+function fmtHtml(text) {
+  const safe = escapeHtml(text);
+  return safe.replace(/\^{([^}]+)}/g, '<sup>$1</sup>')
+             .replace(/\^(-?\w+)/g, '<sup>$1</sup>');
 }
 
 function formatNumber(num, decimals = APP_CONFIG.DEFAULT_DECIMALS) {
@@ -204,6 +325,7 @@ const GlobalNav = {
   // Page callbacks (set by each page's script)
   onSidebarSignalClick: null,   // (batch, idx, name, units)
   onFileSelected: null,         // ()
+  onSelectionChange: null,      // () — called when serial/step/file changes
 
   // Internal
   _ready: null,
@@ -308,11 +430,22 @@ const GlobalNav = {
     URLState.save();
   },
 
+  /**
+   * Clear all page-specific sessionStorage keys so that every page
+   * starts fresh after a serial / step / file change — not just the
+   * page the user happens to be on.
+   */
+  _clearAllPageState() {
+    ['viewerState', 'analysisState', 'cmpState'].forEach(k => sessionStorage.removeItem(k));
+  },
+
   // ── Dropdown handlers (called from inline onchange in base.html) ──────
 
   async onSerialChange() {
     this.serial = this._serialEl.value;
     this._resetFrom('step');
+    this._clearAllPageState();
+    if (this.onSelectionChange) this.onSelectionChange();
     if (!this.serial) { URLState.save(); return; }
 
     try {
@@ -335,6 +468,8 @@ const GlobalNav = {
   async onStepChange() {
     this.step = this._stepEl.value;
     this._resetFrom('file');
+    this._clearAllPageState();
+    if (this.onSelectionChange) this.onSelectionChange();
     if (!this.step) { URLState.save(); return; }
 
     try {
@@ -355,6 +490,8 @@ const GlobalNav = {
   },
 
   async onFileChange() {
+    this._clearAllPageState();
+    if (this.onSelectionChange) this.onSelectionChange();
     const selectedPath = this._fileEl.value;
     if (!selectedPath) {
       this.filePath = null; this.fileName = null; this.fileSize = null;
@@ -384,9 +521,13 @@ const GlobalNav = {
 
     const encoded = encodePath(this.filePath);
 
-    if (showOverlay) showLoading('Loading signal list\u2026');
-    const data = await apiFetch(`/api/files/${encoded}/batches`);
-    if (showOverlay) hideLoading();
+    if (showOverlay) showLoading('Loading signal list\u2026', { fileSize: this.fileSize || 0 });
+    let data;
+    try {
+      data = await apiFetch(`/api/files/${encoded}/batches`);
+    } finally {
+      if (showOverlay) hideLoading();
+    }
 
     const batchNames = data.batches || [];
     if (batchNames.length === 0) { this._clearSidebar(); return; }
@@ -450,8 +591,8 @@ const GlobalNav = {
       item.setAttribute('data-idx', i);
       item.innerHTML = `
         <span class="signal-dot"></span>
-        <span class="signal-name">${escapeHtml(name)}</span>
-        <span class="signal-units">${escapeHtml(unit) || '\u2014'}</span>
+        <span class="signal-name">${fmtHtml(name)}</span>
+        <span class="signal-units">${fmtHtml(unit) || '\u2014'}</span>
       `;
       item.addEventListener('click', () => {
         if (this.onSidebarSignalClick) {
@@ -580,6 +721,11 @@ document.addEventListener('keydown', (e) => {
     document.querySelectorAll('.toast').forEach(t => t.remove());
   }
 });
+
+// Safety net: if any unhandled error / rejection occurs while the loading
+// overlay is visible, force-hide it so the UI doesn't freeze permanently.
+window.addEventListener('unhandledrejection', () => { hideLoading(); });
+window.addEventListener('error', () => { hideLoading(); });
 
 // ============================================================================
 // 9. DEBUG EXPORTS

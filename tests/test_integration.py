@@ -217,7 +217,7 @@ class TestBatchesAndSignals(IntegrationTestBase):
         self.assertIn('name', response)
         self.assertIn('units', response)
         self.assertIn('samples', response)
-        # DEFAULT_GROUP (GROUP_T0) is Type A: signal 0 has n_sample=800
+        # DEFAULT_GROUP (GROUP_T0) is Type A: signal 0 has n_samples=800
         self.assertEqual(response['samples'], 800)
         self.assertEqual(len(response['time']), 800)
         self.assertEqual(len(response['values']), 800)

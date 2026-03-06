@@ -44,10 +44,12 @@
         </div>
       </div>
 
-      <!-- Rainflow histogram -->
+      <!-- Rainflow histogram + Exceedance plot stacked -->
       <div class="analysis-hist-card card">
         <div class="card-body" style="padding:0">
           <div id="rainflowPlot" class="plot-area" style="width:100%;min-height:340px"></div>
+          <div id="exceedancePlot" class="plot-area" style="width:100%;min-height:340px"></div>
+          <div id="maxMinExceedancePlot" class="plot-area" style="width:100%;min-height:340px"></div>
         </div>
       </div>
     </div>
@@ -84,24 +86,23 @@ async function loadAnalysis(batch, idx, name, units) {
 
   try {
     showLoading('Computing statistics\u2026');
+
+    // Single combined request: stats + rainflow vis + downsampled values
     const result = await apiPost('/api/analysis/stats', {
       file_path: GlobalNav.filePath,
       batch: batch,
       signal_idx: idx,
-      rainflow_bins: 10
+      rainflow_bins: 10,
+      include_signal: 5000
     });
-
-    const encoded = encodePath(GlobalNav.filePath);
-    const sigUrl = `/api/files/${encoded}/batches/${encodeURIComponent(batch)}/signals/${idx}?downsample=5000`;
-    const sigData = await apiFetch(sigUrl);
     hideLoading();
 
     lastStatsResult = result;
-    lastHistValues = sigData.values;
+    lastHistValues = result.values || null;
 
     renderStats(result);
-    renderHistogram(sigData.values, units);
-    renderRainflow(result.rainflow, units);
+    if (lastHistValues) renderHistogram(lastHistValues, units);
+    renderRainflowFromServer(result.rainflow, units);
     GlobalNav.updateSidebarHighlights([
       { batch, idx, color: '#0077cc' }
     ]);
@@ -129,9 +130,14 @@ function renderStats(data) {
   });
 }
 
-// ── Render rainflow: summary + percentile table + histogram ──────────────
+// ── Render rainflow from server pre-computed visualisation data ───────────
 
-function renderRainflow(rf, units) {
+/**
+ * Render rainflow section using the server's pre-computed vis payload.
+ * The server sends: counts, bin_edges, percentiles[], exceedance curves,
+ * maxRange, total_cycles, total_half_cycles — NO raw ranges/maxs/mins.
+ */
+function renderRainflowFromServer(rf, units) {
   const summary = document.getElementById('rainflowSummary');
   const tableEl = document.getElementById('rainflowTable');
   summary.innerHTML = '';
@@ -139,49 +145,26 @@ function renderRainflow(rf, units) {
 
   if (!rf) return;
 
-  // Summary rows
   summary.appendChild(statRow('Total Full Cycles', rf.total_cycles));
-
-  // Max cycle value
-  if (rf.ranges && rf.ranges.length > 0) {
-    let maxVal = -Infinity;
-    for (let i = 0; i < rf.ranges.length; i++) {
-      if (rf.ranges[i] > maxVal) maxVal = rf.ranges[i];
-    }
-    summary.appendChild(statRow('Max Cycle Range', fmtVal(maxVal), units));
+  if (rf.maxRange !== null && rf.maxRange !== undefined) {
+    summary.appendChild(statRow('Max Cycle Range', fmtVal(rf.maxRange), units));
   }
 
-  // Percentile table (every 10th percentile)
-  if (rf.ranges && rf.ranges.length > 0) {
-    const sorted = rf.ranges.slice().sort((a, b) => a - b);
-    const n = sorted.length;
-
-    // Build percentile data: for each percentile, show the cycle value
-    // and the number of cycles at or above that threshold
-    const rows = [];
-    for (let p = 10; p <= 100; p += 10) {
-      const idx = Math.min(Math.floor((p / 100) * n), n - 1);
-      const val = sorted[idx];
-      // Count cycles with range >= this value
-      let count = 0;
-      for (let j = 0; j < n; j++) {
-        if (sorted[j] >= val) { count = n - j; break; }
-      }
-      rows.push({ percentile: p, value: val, count });
-    }
-
+  // Percentile table (pre-computed by server)
+  if (rf.percentiles && rf.percentiles.length > 0) {
+    const unitStr = units ? ' (' + fmtHtml(units) + ')' : '';
     const table = document.createElement('table');
     table.className = 'percentile-table';
     table.innerHTML = `
       <thead>
         <tr>
           <th>Percentile</th>
-          <th>Cycle Range${units ? ' (' + escapeHtml(units) + ')' : ''}</th>
+          <th>Cycle Range${unitStr}</th>
           <th>Cycles \u2265 Value</th>
         </tr>
       </thead>
       <tbody>
-        ${rows.map(r => `
+        ${rf.percentiles.map(r => `
           <tr>
             <td>${r.percentile}th</td>
             <td class="mono">${fmtVal(r.value)}</td>
@@ -194,6 +177,151 @@ function renderRainflow(rf, units) {
   }
 
   renderRainflowHistogram(rf, units);
+  renderExceedance(rf.rangeExceedance, units);
+  renderMaxMinExceedance(rf.maxExceedance, rf.minExceedance, units);
+}
+
+/**
+ * Restore all rainflow visuals from saved state.
+ * The server response and the sessionStorage cache share the same shape
+ * (counts, bin_edges, percentiles, exceedance curves, maxRange, totals),
+ * so this simply delegates to renderRainflowFromServer.
+ */
+function renderRainflowFromCache(cache, units) {
+  renderRainflowFromServer(cache, units);
+}
+
+// ── Render exceedance plot (cycles exceeding a given range) ──────────────
+
+const _EMPTY_PLOT_OPTS = { responsive: true };
+
+function _emptyAnnotation(el, text) {
+  Plotly.newPlot(el, [], {
+    annotations: [{
+      text: text, xref: 'paper', yref: 'paper',
+      x: 0.5, y: 0.5, showarrow: false,
+      font: { size: 13, color: '#8e90a6' }
+    }],
+    xaxis: { visible: false }, yaxis: { visible: false },
+    plot_bgcolor: PLOT_CONFIG.bg, paper_bgcolor: PLOT_CONFIG.paperBg,
+    margin: { l: 20, r: 20, t: 20, b: 20 }
+  }, { ...(_EMPTY_PLOT_OPTS), displaylogo: false, showLink: false });
+}
+
+/**
+ * Render cycle-range exceedance plot.
+ * @param {Object|null} curve  { x: [counts], y: [range values] }
+ * @param {string} units
+ */
+function renderExceedance(curve, units) {
+  const el = document.getElementById('exceedancePlot');
+
+  if (!curve || !curve.x || curve.x.length === 0) {
+    _emptyAnnotation(el, 'No rainflow cycles for exceedance plot');
+    return;
+  }
+
+  const unitLabel = units ? ' (' + fmtHtml(units) + ')' : '';
+
+  const trace = {
+    x: curve.x, y: curve.y,
+    type: 'scatter',
+    mode: 'lines+markers',
+    line: { color: '#6a1b9a', width: 2 },
+    marker: { color: '#6a1b9a', size: 5 },
+    fill: 'tozerox',
+    fillcolor: 'rgba(106,27,154,0.10)',
+    hovertemplate: 'Cycles \u2265 range: %{x}<br>Range: %{y:.4f}' + unitLabel + '<extra></extra>'
+  };
+
+  const layout = {
+    title: { text: 'Range Exceedance', font: { size: 14, color: '#1a1a2e' } },
+    xaxis: {
+      ...PLOT_CONFIG.axis,
+      title: { text: 'Cumulative Cycle Count' },
+      type: 'log',
+      rangemode: 'tozero'
+    },
+    yaxis: {
+      ...PLOT_CONFIG.axis,
+      title: { text: `Cycle Range${unitLabel}` },
+      rangemode: 'tozero'
+    },
+    margin: { l: 64, r: 24, t: 48, b: 56 },
+    plot_bgcolor: PLOT_CONFIG.bg, paper_bgcolor: PLOT_CONFIG.paperBg,
+    font: PLOT_CONFIG.font,
+    hovermode: 'closest', showlegend: false
+  };
+
+  Plotly.newPlot(el, [trace], layout, { ...(_EMPTY_PLOT_OPTS), displaylogo: false, showLink: false });
+}
+
+// ── Render cycle max / min exceedance plot ────────────────────────────────
+
+/**
+ * Render max-of-cycle and min-of-cycle exceedance on the same plot.
+ * @param {Object|null} maxCurve  { x: [counts], y: [max values] }
+ * @param {Object|null} minCurve  { x: [counts], y: [min values] }
+ * @param {string} units
+ */
+function renderMaxMinExceedance(maxCurve, minCurve, units) {
+  const el = document.getElementById('maxMinExceedancePlot');
+
+  if ((!maxCurve || !maxCurve.x || maxCurve.x.length === 0) &&
+      (!minCurve || !minCurve.x || minCurve.x.length === 0)) {
+    _emptyAnnotation(el, 'No cycle max/min data for exceedance plot');
+    return;
+  }
+
+  const unitLabel = units ? ' (' + fmtHtml(units) + ')' : '';
+  const traces = [];
+
+  if (maxCurve && maxCurve.x && maxCurve.x.length > 0) {
+    traces.push({
+      x: maxCurve.x, y: maxCurve.y,
+      type: 'scatter',
+      mode: 'lines+markers',
+      name: 'Cycle Max',
+      line: { color: '#d32f2f', width: 2 },
+      marker: { color: '#d32f2f', size: 4 },
+      hovertemplate: 'Cycles with max \u2265 %{y:.4f}: %{x}<extra>Cycle Max</extra>'
+    });
+  }
+
+  if (minCurve && minCurve.x && minCurve.x.length > 0) {
+    traces.push({
+      x: minCurve.x, y: minCurve.y,
+      type: 'scatter',
+      mode: 'lines+markers',
+      name: 'Cycle Min',
+      line: { color: '#1565c0', width: 2 },
+      marker: { color: '#1565c0', size: 4 },
+      hovertemplate: 'Cycles with min \u2264 %{y:.4f}: %{x}<extra>Cycle Min</extra>'
+    });
+  }
+
+  const layout = {
+    title: { text: 'Cycle Max / Min Exceedance', font: { size: 14, color: '#1a1a2e' } },
+    xaxis: {
+      ...PLOT_CONFIG.axis,
+      title: { text: 'Cumulative Cycle Count' },
+      type: 'log',
+      rangemode: 'tozero'
+    },
+    yaxis: {
+      ...PLOT_CONFIG.axis,
+      title: { text: `Value${unitLabel}` },
+      rangemode: 'normal'
+    },
+    margin: { l: 64, r: 24, t: 48, b: 56 },
+    plot_bgcolor: PLOT_CONFIG.bg, paper_bgcolor: PLOT_CONFIG.paperBg,
+    font: PLOT_CONFIG.font,
+    hovermode: 'closest',
+    showlegend: true,
+    legend: { x: 1, xanchor: 'right', y: 1, bgcolor: 'rgba(255,255,255,0.8)' }
+  };
+
+  Plotly.newPlot(el, traces, layout, { ...(_EMPTY_PLOT_OPTS), displaylogo: false, showLink: false });
 }
 
 function renderRainflowHistogram(rf, units) {
@@ -209,7 +337,7 @@ function renderRainflowHistogram(rf, units) {
       xaxis: { visible: false }, yaxis: { visible: false },
       plot_bgcolor: PLOT_CONFIG.bg, paper_bgcolor: PLOT_CONFIG.paperBg,
       margin: { l: 20, r: 20, t: 20, b: 20 }
-    }, { responsive: true });
+    }, { responsive: true, displaylogo: false, showLink: false });
     return;
   }
 
@@ -224,7 +352,7 @@ function renderRainflowHistogram(rf, units) {
     }
   }
 
-  const unitLabel = units ? ` (${units})` : '';
+  const unitLabel = units ? ' (' + fmtHtml(units) + ')' : '';
 
   const trace = {
     x: labels, y: counts,
@@ -236,25 +364,25 @@ function renderRainflowHistogram(rf, units) {
   const layout = {
     title: { text: 'Cycle Range Distribution', font: { size: 14, color: '#1a1a2e' } },
     xaxis: {
-      title: `Cycle Range${unitLabel}`,
-      tickangle: -45, tickfont: { size: 10 },
-      ...PLOT_CONFIG.axis
+      ...PLOT_CONFIG.axis,
+      title: { text: `Cycle Range${unitLabel}` },
+      tickangle: -45, tickfont: { size: 10 }
     },
-    yaxis: { title: 'Cycle Count', ...PLOT_CONFIG.axis },
+    yaxis: { ...PLOT_CONFIG.axis, title: { text: 'Cycle Count' } },
     margin: { l: 56, r: 24, t: 48, b: 80 },
     plot_bgcolor: PLOT_CONFIG.bg, paper_bgcolor: PLOT_CONFIG.paperBg,
     font: PLOT_CONFIG.font,
     hovermode: 'closest', showlegend: false, bargap: 0.15
   };
 
-  Plotly.newPlot(el, [trace], layout, { responsive: true });
+  Plotly.newPlot(el, [trace], layout, { responsive: true, displaylogo: false, showLink: false });
 }
 
 // ── Render value histogram ───────────────────────────────────────────────
 
 function renderHistogram(values, units) {
   const el = document.getElementById('histogramPlot');
-  const unitLabel = units ? ` (${units})` : '';
+  const unitLabel = units ? ' (' + fmtHtml(units) + ')' : '';
 
   const trace = {
     x: values,
@@ -265,8 +393,8 @@ function renderHistogram(values, units) {
 
   const layout = {
     title: { text: 'Value Distribution', font: { size: 14, color: '#1a1a2e' } },
-    xaxis: { title: `Value${unitLabel}`, ...PLOT_CONFIG.axis },
-    yaxis: { title: 'Count', ...PLOT_CONFIG.axis },
+    xaxis: { ...PLOT_CONFIG.axis, title: { text: `Value${unitLabel}` } },
+    yaxis: { ...PLOT_CONFIG.axis, title: { text: 'Count' } },
     margin: { l: 56, r: 24, t: 48, b: 56 },
     plot_bgcolor: PLOT_CONFIG.bg,
     paper_bgcolor: PLOT_CONFIG.paperBg,
@@ -274,7 +402,7 @@ function renderHistogram(values, units) {
     hovermode: 'closest', showlegend: false
   };
 
-  Plotly.newPlot(el, [trace], layout, { responsive: true });
+  Plotly.newPlot(el, [trace], layout, { responsive: true, displaylogo: false, showLink: false });
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────────
@@ -282,7 +410,7 @@ function renderHistogram(values, units) {
 function statRow(label, value, unit) {
   const el = document.createElement('div');
   el.className = 'stat-row';
-  const unitSpan = unit ? `<span class="stat-unit">${escapeHtml(unit)}</span>` : '';
+  const unitSpan = unit ? `<span class="stat-unit">${fmtHtml(unit)}</span>` : '';
   el.innerHTML = `
     <span class="stat-row-label">${escapeHtml(label)}</span>
     <span class="stat-row-value">${escapeHtml(String(value))}${unitSpan}</span>
@@ -310,15 +438,157 @@ function updateUI() {
 
 // ── State persistence ─────────────────────────────────────────────────────
 
+/**
+ * Build an exceedance curve: "how many cycles have value >= threshold?"
+ * Sorts descending.  Returns { x: [counts], y: [thresholds] }.
+ */
+function _buildExceedanceCurveDesc(values) {
+  const sorted = values.slice().sort((a, b) => b - a);
+  const n = sorted.length;
+  const thresholds = [], counts = [];
+  let prev = null;
+  for (let i = 0; i < n; i++) {
+    if (sorted[i] !== prev) {
+      thresholds.push(sorted[i]);
+      counts.push(i + 1);
+      prev = sorted[i];
+    }
+  }
+  if (counts.length > 0 && counts[counts.length - 1] !== n) {
+    thresholds.push(sorted[n - 1]);
+    counts.push(n);
+  }
+  return { x: counts, y: thresholds };
+}
+
+/**
+ * Build an exceedance curve: "how many cycles have value <= threshold?"
+ * Sorts ascending.  Returns { x: [counts], y: [thresholds] }.
+ */
+function _buildExceedanceCurveAsc(values) {
+  const sorted = values.slice().sort((a, b) => a - b);
+  const n = sorted.length;
+  const thresholds = [], counts = [];
+  let prev = null;
+  for (let i = 0; i < n; i++) {
+    if (sorted[i] !== prev) {
+      thresholds.push(sorted[i]);
+      counts.push(i + 1);
+      prev = sorted[i];
+    }
+  }
+  if (counts.length > 0 && counts[counts.length - 1] !== n) {
+    thresholds.push(sorted[n - 1]);
+    counts.push(n);
+  }
+  return { x: counts, y: thresholds };
+}
+
+/**
+ * Downsample an exceedance curve to at most maxPts points.
+ * Uses log-spaced sampling on the x-axis (cycle counts) since the plot
+ * uses a log x-axis.  Always keeps the first and last point.
+ */
+function _downsampleCurve(curve, maxPts) {
+  if (!curve || !curve.x || curve.x.length <= maxPts) return curve;
+  const n = curve.x.length;
+  const indices = new Set();
+  indices.add(0);
+  indices.add(n - 1);
+  // Log-spaced indices between first and last
+  const logMin = Math.log(1);
+  const logMax = Math.log(n);
+  for (let i = 1; i < maxPts - 1; i++) {
+    const logIdx = logMin + (logMax - logMin) * i / (maxPts - 1);
+    const idx = Math.min(Math.round(Math.exp(logIdx)) - 1, n - 1);
+    indices.add(idx);
+  }
+  const sorted = Array.from(indices).sort((a, b) => a - b);
+  return {
+    x: sorted.map(i => curve.x[i]),
+    y: sorted.map(i => curve.y[i])
+  };
+}
+
+/** Max points per exceedance curve stored in sessionStorage. */
+const _MAX_CACHE_CURVE_PTS = 500;
+
+/**
+ * Pre-compute everything needed to restore plots from rainflow data.
+ * Exceedance curves are downsampled to _MAX_CACHE_CURVE_PTS to keep
+ * the sessionStorage payload small (well under 5 MB even for huge signals).
+ */
+function _precomputeRainflowCache(rf) {
+  if (!rf) return null;
+
+  // Percentile table data
+  const percentiles = [];
+  if (rf.ranges && rf.ranges.length > 0) {
+    const sorted = rf.ranges.slice().sort((a, b) => a - b);
+    const n = sorted.length;
+    for (let p = 10; p <= 100; p += 10) {
+      const idx = Math.min(Math.floor((p / 100) * n), n - 1);
+      const val = sorted[idx];
+      let count = 0;
+      for (let j = 0; j < n; j++) {
+        if (sorted[j] >= val) { count = n - j; break; }
+      }
+      percentiles.push({ percentile: p, value: val, count: count });
+    }
+  }
+
+  // Max range
+  let maxRange = null;
+  if (rf.ranges && rf.ranges.length > 0) {
+    maxRange = -Infinity;
+    for (let i = 0; i < rf.ranges.length; i++) {
+      if (rf.ranges[i] > maxRange) maxRange = rf.ranges[i];
+    }
+  }
+
+  // Exceedance curves — downsample for storage
+  const rangeExceedance = (rf.ranges && rf.ranges.length > 0)
+    ? _downsampleCurve(_buildExceedanceCurveDesc(rf.ranges), _MAX_CACHE_CURVE_PTS) : null;
+  const maxExceedance = (rf.cycle_maxs && rf.cycle_maxs.length > 0)
+    ? _downsampleCurve(_buildExceedanceCurveDesc(rf.cycle_maxs), _MAX_CACHE_CURVE_PTS) : null;
+  const minExceedance = (rf.cycle_mins && rf.cycle_mins.length > 0)
+    ? _downsampleCurve(_buildExceedanceCurveAsc(rf.cycle_mins), _MAX_CACHE_CURVE_PTS) : null;
+
+  return {
+    total_cycles: rf.total_cycles,
+    total_half_cycles: rf.total_half_cycles,
+    counts: rf.counts,
+    bin_edges: rf.bin_edges,
+    maxRange: maxRange,
+    percentiles: percentiles,
+    rangeExceedance: rangeExceedance,
+    maxExceedance: maxExceedance,
+    minExceedance: minExceedance
+  };
+}
+
 function saveAnalysisState() {
   try {
-    sessionStorage.setItem('analysisState', JSON.stringify({
+    // The server response is already compact (no raw ranges/cycle arrays),
+    // so we can save it directly.  Only histValues (≤5000 floats) adds bulk.
+    const payload = JSON.stringify({
       signal: currentSignal,
       stats: lastStatsResult,
       histValues: lastHistValues
-    }));
+    });
+    sessionStorage.setItem('analysisState', payload);
   } catch (e) {
-    console.warn('analysisState save failed (storage full?):', e);
+    // Fallback: save without histogram values
+    console.warn('analysisState save: retrying without histValues:', e);
+    try {
+      sessionStorage.setItem('analysisState', JSON.stringify({
+        signal: currentSignal,
+        stats: lastStatsResult,
+        histValues: null
+      }));
+    } catch (e2) {
+      console.warn('analysisState save failed:', e2);
+    }
   }
 }
 
@@ -335,7 +605,11 @@ function restoreAnalysisState() {
     if (state.stats) {
       lastStatsResult = state.stats;
       renderStats(state.stats);
-      renderRainflow(state.stats.rainflow, currentSignal.units);
+
+      // The rainflow data (from server or cache) uses the same shape
+      if (state.stats.rainflow) {
+        renderRainflowFromCache(state.stats.rainflow, currentSignal.units);
+      }
     }
     if (state.histValues) {
       lastHistValues = state.histValues;
@@ -347,7 +621,27 @@ function restoreAnalysisState() {
     ]);
   } catch (e) {
     console.warn('analysisState restore failed:', e);
+    sessionStorage.removeItem('analysisState');
   }
+}
+
+// ── Clear all analysis state ──────────────────────────────────────────────
+
+function clearAnalysis() {
+  currentSignal = { batch: null, idx: null, name: '', units: '' };
+  lastStatsResult = null;
+  lastHistValues = null;
+
+  document.getElementById('statsGrid').innerHTML = '';
+  document.getElementById('rainflowSummary').innerHTML = '';
+  document.getElementById('rainflowTable').innerHTML = '';
+
+  ['histogramPlot', 'rainflowPlot', 'exceedancePlot', 'maxMinExceedancePlot'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) Plotly.purge(el);
+  });
+
+  updateUI();
 }
 
 // ── Init ──────────────────────────────────────────────────────────────────
@@ -358,6 +652,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   GlobalNav.onSidebarSignalClick = (batch, idx, name, units) => {
     loadAnalysis(batch, idx, name, units);
   };
+
+  GlobalNav.onSelectionChange = clearAnalysis;
 
   restoreAnalysisState();
 });

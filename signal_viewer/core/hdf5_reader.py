@@ -7,20 +7,27 @@ without h5py dependency.
 
 HDF5 internal layout (per configured group):
   /GROUP_NAME/
-      GROUP_NAME_V   float64 [num_signals, max_samples]  signal values
-      GROUP_NAME_T   float64 [num_signals]               start time per signal
-      GROUP_NAME_FS  float64 [num_signals]               sampling freq per signal
-      GROUP_NAME_NS  int64   [num_signals]  (optional)   valid sample count
-      GROUP_NAME_N   str     [num_signals]               signal names
-      GROUP_NAME_U   str     [num_signals]               units
+      GROUP_NAME_V    float64 [n_signals, max(n_samples)]  signal values
+      GROUP_NAME_TIM  float64 [n_signals]  epoch time (ms) of first sample
+      GROUP_NAME_FRE  float64 [n_signals]  sampling frequency (Hz)
+      GROUP_NAME_SAM  int64   [n_signals]  valid sample count per signal
+      GROUP_NAME_N    str     [n_signals]  signal names
+      GROUP_NAME_UNI  str     [n_signals]  units
+
+  Type B groups additionally contain:
+      GROUP_NAME_ERR  float64 [n_signals, max(n_samples)]  signal errors
+      GROUP_NAME_SQI  float64 [n_signals]  signal quality metric
+      GROUP_NAME_TLS  float64 [n_signals]  max error gap (seconds)
 
 Batch types:
-  Type A – _NS dataset present: each signal has n_sample[i] valid points.
-  Type B – _NS dataset absent:  full value matrix is valid (rectangular).
+  Type A – only base datasets (no _ERR, _SQI, _TLS)
+  Type B – base datasets + _ERR, _SQI, _TLS
+
+Both types have _SAM (valid sample count per signal).
 
 Time construction (both types):
-  time = t0 + arange(length) / fs
-  where t0 = _T[signal_index], fs = _FS[signal_index]
+  time = TIM[idx] + arange(length) * (1000.0 / FRE[idx])
+  where TIM is epoch time in milliseconds and FRE is in Hz.
 
 Dataset names are built as: group_name + suffix (e.g. "GROUP_T0_V").
 """
@@ -48,8 +55,9 @@ class MockHDF5File:
     Mock HDF5 file class that mimics h5py.File using numpy arrays.
     Useful for testing without h5py dependency.
 
-    GROUP_T0 is Type A (has _NS dataset).
-    GROUP_T1 is Type B (no _NS dataset).
+    GROUP_T0 is Type A (no _ERR/_SQI/_TLS datasets).
+    GROUP_T1 is Type B (has _ERR/_SQI/_TLS datasets).
+    Both groups have _SAM.
     """
 
     def __init__(self, file_path: str, mode: str = "r"):
@@ -69,22 +77,29 @@ class MockHDF5File:
 
         names = np.array(["position", "velocity", "current", "voltage"], dtype=object)
         units = np.array(["m", "m/s", "A", "V"], dtype=object)
-        start_times = np.array([0.0, 0.5, 1.0, 2.0], dtype=np.float64)
+        # Epoch time in ms (all same starting epoch)
+        epoch_ms = np.array([1700000000000.0] * num_signals, dtype=np.float64)
         samp_freqs = np.array([100.0, 200.0, 100.0, 500.0], dtype=np.float64)
-        nsample_a = np.array([800, 600, 900, 750], dtype=np.int64)
+        nsample = np.array([800, 600, 900, 750], dtype=np.int64)
 
         for group_name in S.GROUP_NAMES:
             values = rng.randn(num_signals, max_samples).astype(np.float64)
             datasets = {
                 S.ds(group_name, S.VALUE_SUFFIX): values,
-                S.ds(group_name, S.TIME_SUFFIX): start_times.copy(),
+                S.ds(group_name, S.TIME_SUFFIX): epoch_ms.copy(),
                 S.ds(group_name, S.SAMPLING_FREQ_SUFFIX): samp_freqs.copy(),
+                S.ds(group_name, S.NSAMPLE_SUFFIX): nsample.copy(),
                 S.ds(group_name, S.NAMES_SUFFIX): names.copy(),
                 S.ds(group_name, S.UNITS_SUFFIX): units.copy(),
             }
-            # First group is Type A (has _NS); others are Type B
-            if group_name == S.GROUP_NAMES[0]:
-                datasets[S.ds(group_name, S.NSAMPLE_SUFFIX)] = nsample_a.copy()
+            # Second group onward is Type B (add _ERR, _SQI, _TLS)
+            if group_name != S.GROUP_NAMES[0]:
+                errors = rng.randn(num_signals, max_samples).astype(np.float64) * 0.1
+                sqi = rng.uniform(0.8, 1.0, size=num_signals).astype(np.float64)
+                tls = rng.uniform(0.0, 5.0, size=num_signals).astype(np.float64)
+                datasets[S.ds(group_name, S.ERROR_SUFFIX)] = errors
+                datasets[S.ds(group_name, S.SQI_SUFFIX)] = sqi
+                datasets[S.ds(group_name, S.TLS_SUFFIX)] = tls
 
             self._groups[group_name] = datasets
 
@@ -144,8 +159,9 @@ def create_test_file(file_path: str) -> None:
     """
     Create a test HDF5 file with sample data using the configured schema.
 
-    GROUP_T0 is created as Type A (with _NS dataset).
-    GROUP_T1 is created as Type B (without _NS dataset).
+    GROUP_T0 is created as Type A (no _ERR/_SQI/_TLS).
+    GROUP_T1 is created as Type B (with _ERR/_SQI/_TLS).
+    Both groups have _SAM.
 
     Args:
         file_path: Path where test file should be created
@@ -158,9 +174,9 @@ def create_test_file(file_path: str) -> None:
 
     names = np.array(["position", "velocity", "current", "voltage"], dtype=object)
     units = np.array(["m", "m/s", "A", "V"], dtype=object)
-    start_times = np.array([0.0, 0.5, 1.0, 2.0], dtype=np.float64)
+    epoch_ms = np.array([1700000000000.0] * num_signals, dtype=np.float64)
     samp_freqs = np.array([100.0, 200.0, 100.0, 500.0], dtype=np.float64)
-    nsample_a = np.array([800, 600, 900, 750], dtype=np.int64)
+    nsample = np.array([800, 600, 900, 750], dtype=np.int64)
 
     if HAS_H5PY:
         try:
@@ -169,13 +185,19 @@ def create_test_file(file_path: str) -> None:
                     grp = f.create_group(group_name)
                     values = rng.randn(num_signals, max_samples).astype(np.float64)
                     grp.create_dataset(S.ds(group_name, S.VALUE_SUFFIX), data=values)
-                    grp.create_dataset(S.ds(group_name, S.TIME_SUFFIX), data=start_times)
+                    grp.create_dataset(S.ds(group_name, S.TIME_SUFFIX), data=epoch_ms)
                     grp.create_dataset(S.ds(group_name, S.SAMPLING_FREQ_SUFFIX), data=samp_freqs)
+                    grp.create_dataset(S.ds(group_name, S.NSAMPLE_SUFFIX), data=nsample)
                     grp.create_dataset(S.ds(group_name, S.NAMES_SUFFIX), data=names)
                     grp.create_dataset(S.ds(group_name, S.UNITS_SUFFIX), data=units)
-                    # First group → Type A
-                    if group_name == S.GROUP_NAMES[0]:
-                        grp.create_dataset(S.ds(group_name, S.NSAMPLE_SUFFIX), data=nsample_a)
+                    # Type B (second group onward): add _ERR, _SQI, _TLS
+                    if group_name != S.GROUP_NAMES[0]:
+                        errors = rng.randn(num_signals, max_samples).astype(np.float64) * 0.1
+                        sqi = rng.uniform(0.8, 1.0, size=num_signals).astype(np.float64)
+                        tls = rng.uniform(0.0, 5.0, size=num_signals).astype(np.float64)
+                        grp.create_dataset(S.ds(group_name, S.ERROR_SUFFIX), data=errors)
+                        grp.create_dataset(S.ds(group_name, S.SQI_SUFFIX), data=sqi)
+                        grp.create_dataset(S.ds(group_name, S.TLS_SUFFIX), data=tls)
         except Exception as e:
             raise IOError(f"Failed to create HDF5 test file at {file_path}: {e}") from e
     else:
@@ -195,8 +217,9 @@ class HDF5Reader:
     Dataset names are built from group_name + suffix.
 
     Supports two batch types:
-      Type A – _NS dataset present → per-signal valid sample counts
-      Type B – _NS dataset absent  → full rectangular value matrix
+      Type A – no _ERR dataset → base datasets only
+      Type B – _ERR dataset present → base + error/quality datasets
+    Both types have _SAM (valid sample count per signal).
     """
 
     def __init__(self, file_path: str):
@@ -272,7 +295,10 @@ class HDF5Reader:
               - signal_names: List[str]
               - units: List[str]
               - batch_type: str  ("A" or "B")
-              - n_samples: Optional[List[int]]  (per-signal counts for Type A)
+              - n_samples: List[int]  (per-signal valid counts)
+              For Type B additionally:
+              - sqi: List[float]  (signal quality index)
+              - tls: List[float]  (max error gap in seconds)
 
         Raises:
             ValueError: If group does not exist or is missing required datasets
@@ -284,6 +310,9 @@ class HDF5Reader:
         ds_names = S.ds(group_name, S.NAMES_SUFFIX)
         ds_units = S.ds(group_name, S.UNITS_SUFFIX)
         ds_nsample = S.ds(group_name, S.NSAMPLE_SUFFIX)
+        ds_err = S.ds(group_name, S.ERROR_SUFFIX)
+        ds_sqi = S.ds(group_name, S.SQI_SUFFIX)
+        ds_tls = S.ds(group_name, S.TLS_SUFFIX)
 
         with self._lock:
             with self._open_file() as f:
@@ -310,22 +339,30 @@ class HDF5Reader:
                     for u in group[ds_units][:]
                 ] if ds_units in group else [""] * signal_count
 
-                # Determine batch type
+                # Both types have _SAM
                 if ds_nsample in group:
-                    batch_type = "A"
                     n_samples = [int(v) for v in group[ds_nsample][:]]
                 else:
-                    batch_type = "B"
-                    n_samples = None
+                    n_samples = [sample_count] * signal_count
+
+                # Type B detection: presence of _ERR dataset
+                is_type_b = ds_err in group
 
                 metadata = {
                     "signal_count": signal_count,
                     "sample_count": sample_count,
                     "signal_names": signal_names,
                     "units": units,
-                    "batch_type": batch_type,
+                    "batch_type": "B" if is_type_b else "A",
                     "n_samples": n_samples,
                 }
+
+                # Type B extra fields
+                if is_type_b:
+                    if ds_sqi in group:
+                        metadata["sqi"] = [float(v) for v in group[ds_sqi][:]]
+                    if ds_tls in group:
+                        metadata["tls"] = [float(v) for v in group[ds_tls][:]]
 
                 self._metadata_cache[group_name] = metadata
 
@@ -346,15 +383,13 @@ class HDF5Reader:
         """
         Load a single signal with constructed time vector.
 
-        Type A (n_sample dataset exists):
-            signal = values[idx, :n_sample[idx]]
-        Type B (no n_sample dataset):
-            signal = values[idx, :]
+        Both Type A and Type B use _SAM for valid sample count:
+            signal = values[idx, :n_samples[idx]]
 
         Time is always constructed:
-            t0 = time_dataset[idx]
-            fs = freq_dataset[idx]
-            time = t0 + arange(length) / fs
+            t0 = TIM[idx]   (epoch ms)
+            fs = FRE[idx]   (Hz)
+            time = t0 + arange(length) * (1000.0 / fs)
 
         Args:
             group_name: Name of the HDF5 group
@@ -378,17 +413,13 @@ class HDF5Reader:
         ds_values = S.ds(group_name, S.VALUE_SUFFIX)
         ds_time = S.ds(group_name, S.TIME_SUFFIX)
         ds_fs = S.ds(group_name, S.SAMPLING_FREQ_SUFFIX)
-        ds_nsample = S.ds(group_name, S.NSAMPLE_SUFFIX)
+
+        # Get valid sample count from metadata (already read from _SAM)
+        n = metadata["n_samples"][signal_index]
 
         with self._lock:
             with self._open_file() as f:
                 group = f[group_name]
-
-                # Determine valid sample count
-                if ds_nsample in group:
-                    n = int(group[ds_nsample][signal_index])
-                else:
-                    n = metadata["sample_count"]
 
                 # Read signal values (only valid portion)
                 signal_data = group[ds_values][signal_index, :n].astype(np.float64)
@@ -397,8 +428,8 @@ class HDF5Reader:
                 t0 = float(group[ds_time][signal_index])
                 fs = float(group[ds_fs][signal_index])
 
-        # Construct time vector
-        time_data = t0 + np.arange(n, dtype=np.float64) / fs
+        # Construct time vector (t0 is epoch ms, fs is Hz → step = 1000/fs ms)
+        time_data = t0 + np.arange(n, dtype=np.float64) * (1000.0 / fs)
 
         return time_data, signal_data
 
@@ -450,18 +481,13 @@ class HDF5Reader:
             raise IndexError(f"Signal index {signal_index} out of range")
 
         ds_values = S.ds(group_name, S.VALUE_SUFFIX)
-        ds_nsample = S.ds(group_name, S.NSAMPLE_SUFFIX)
+
+        # Get valid sample count from metadata
+        n = metadata["n_samples"][signal_index]
 
         with self._lock:
             with self._open_file() as f:
                 group = f[group_name]
-
-                # Determine valid length
-                if ds_nsample in group:
-                    n = int(group[ds_nsample][signal_index])
-                else:
-                    n = metadata["sample_count"]
-
                 signal_data = group[ds_values][signal_index, :n]
 
         return {

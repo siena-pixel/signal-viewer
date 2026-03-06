@@ -4,32 +4,43 @@ Generate realistic dummy HDF5 data for testing the Signal Viewer.
 
 Creates a folder structure matching the expected layout:
     data/
-    ├── p001_motor_test/
-    │   ├── run_nominal/
-    │   │   └── p001_motor_test_2024-06-16_a3f1c2.h5
-    │   ├── run_overload/
-    │   │   └── ...
-    │   └── warmup/
-    │       └── ...
-    ├── p002_vibration_study/
-    │   ├── baseline/
-    │   │   └── ...
-    │   └── loaded/
-    │       └── ...
-    └── p003_endurance/
-        └── cycle_1/
-            └── ...
+    └── SN001/
+        ├── p001_motor_test/
+        │   ├── run_nominal/
+        │   │   └── p001_motor_test_2024-06-16_a3f1c2.h5
+        │   ├── run_overload/
+        │   │   └── ...
+        │   └── warmup/
+        │       └── ...
+        ├── p002_vibration_study/
+        │   ├── baseline/
+        │   │   └── ...
+        │   └── loaded/
+        │       └── ...
+        └── p003_endurance/
+            └── cycle_1/
+                └── ...
 
 Each HDF5 file contains groups from HDF5Schema.GROUP_NAMES.
-Each group has datasets named GROUP_NAME + suffix:
-  - GROUP_NAME_V:  float64[num_signals, num_samples]  (values)
-  - GROUP_NAME_T:  float64[num_samples]                (time)
-  - GROUP_NAME_P:  float64[num_samples]                (positions)
-  - GROUP_NAME_N:  str[num_signals]                    (signal names)
-  - GROUP_NAME_U:  str[num_signals]                    (units)
+  GROUP_T0 = Type A  (no _ERR/_SQI/_TLS)
+  GROUP_T1 = Type B  (has _ERR/_SQI/_TLS)
 
-Signals are realistic engineering waveforms: vibration, temperature,
-pressure, motor current, position encoder, voltage rail, flow rate, etc.
+Both types share these datasets (per group):
+  GROUP_NAME_V    float64 [n_signals, max(n_samples)]  signal values
+  GROUP_NAME_TIM  float64 [n_signals]  epoch time (ms) of first sample
+  GROUP_NAME_FRE  float64 [n_signals]  sampling frequency (Hz)
+  GROUP_NAME_SAM  int64   [n_signals]  valid sample count per signal
+  GROUP_NAME_N    str     [n_signals]  signal names
+  GROUP_NAME_UNI  str     [n_signals]  units
+
+Type B additionally has:
+  GROUP_NAME_ERR  float64 [n_signals, max(n_samples)]  signal errors
+  GROUP_NAME_SQI  float64 [n_signals]  signal quality metric
+  GROUP_NAME_TLS  float64 [n_signals]  max error gap (seconds)
+
+Dummy data spec:
+  Type A: 200 signals, max 1,500,000 samples, frequencies 1-100 Hz, same starting epoch
+  Type B: 200 signals, 1,500,000 samples each, frequency=100 Hz, same starting epoch
 """
 
 import hashlib
@@ -121,24 +132,9 @@ def _motor_current(t: np.ndarray, rng: np.random.Generator) -> np.ndarray:
 
 
 def _position_encoder(t: np.ndarray, rng: np.random.Generator) -> np.ndarray:
-    """Linear encoder: trapezoidal motion profile + quantisation noise."""
+    """Linear encoder: S-curve motion + quantisation noise."""
     stroke = rng.uniform(50, 300)  # mm
-    period = t[-1]
-    # Trapezoidal: accel - cruise - decel
-    accel_frac = 0.2
-    cruise_frac = 0.6
-    decel_frac = 0.2
-    pos = np.zeros_like(t)
-    t_norm = t / period
-    for i, tn in enumerate(t_norm):
-        if tn < accel_frac:
-            pos[i] = 0.5 * stroke * (tn / accel_frac) ** 2 / (0.5 * accel_frac + cruise_frac + 0.5 * decel_frac) * (0.5 * accel_frac + cruise_frac + 0.5 * decel_frac)
-        elif tn < accel_frac + cruise_frac:
-            pos[i] = stroke * (tn - 0.5 * accel_frac) / (0.5 * accel_frac + cruise_frac + 0.5 * decel_frac)
-        else:
-            rem = 1.0 - tn
-            pos[i] = stroke * (1.0 - 0.5 * (rem / decel_frac) ** 2 / (0.5 * accel_frac + cruise_frac + 0.5 * decel_frac) * (0.5 * accel_frac + cruise_frac + 0.5 * decel_frac))
-    # Simplify: just use a smooth S-curve
+    period = t[-1] if t[-1] > 0 else 1.0
     pos = stroke * (3 * (t / period) ** 2 - 2 * (t / period) ** 3)
     # Quantisation noise (encoder resolution)
     resolution = 0.001  # mm
@@ -152,7 +148,6 @@ def _voltage_rail(t: np.ndarray, rng: np.random.Generator) -> np.ndarray:
     sig = np.full_like(t, nominal)
     # Switching ripple
     f_sw = rng.uniform(50e3, 200e3)
-    # Downsample ripple frequency to be visible
     sig += 0.01 * nominal * np.sin(2 * np.pi * (f_sw / 1000) * t)
     # Voltage sag
     n_sags = rng.integers(0, 3)
@@ -216,10 +211,10 @@ def _accelerometer(t: np.ndarray, rng: np.random.Generator) -> np.ndarray:
 
 
 # ---------------------------------------------------------------------------
-# Signal catalogue
+# Signal catalogue (expanded to 200 unique signal names)
 # ---------------------------------------------------------------------------
 
-SIGNAL_CATALOGUE = [
+_BASE_CATALOGUE = [
     ("vibration_x",      "m/s^2",   _vibration),
     ("vibration_y",      "m/s^2",   _vibration),
     ("vibration_z",      "m/s^2",   _vibration),
@@ -237,6 +232,17 @@ SIGNAL_CATALOGUE = [
     ("strain_2",         "ustrain", _strain_gauge),
     ("accel_spindle",    "g",       _accelerometer),
 ]
+
+
+def _build_signal_catalogue(n_signals: int):
+    """Build a catalogue of n_signals unique signal entries by repeating base patterns."""
+    catalogue = []
+    base_len = len(_BASE_CATALOGUE)
+    for i in range(n_signals):
+        name_base, unit, gen_fn = _BASE_CATALOGUE[i % base_len]
+        suffix = f"_{i // base_len}" if i >= base_len else ""
+        catalogue.append((f"{name_base}{suffix}", unit, gen_fn))
+    return catalogue
 
 
 # ---------------------------------------------------------------------------
@@ -261,6 +267,11 @@ SYSTEMS = [
     },
 ]
 
+# Dummy data parameters
+NUM_SIGNALS = 200
+MAX_SAMPLES = 1_500_000
+EPOCH_MS = 1700000000000.0  # Common starting epoch in ms
+
 
 def _make_crc(folder1: str, folder2: str) -> str:
     """Deterministic 6-char hex hash for filename."""
@@ -268,46 +279,103 @@ def _make_crc(folder1: str, folder2: str) -> str:
     return hashlib.md5(raw).hexdigest()[:6]
 
 
-def generate_group(
+def generate_type_a_group(
     grp: h5py.Group,
     group_name: str,
     rng: np.random.Generator,
-    num_signals: int,
-    num_samples: int,
-    duration_sec: float,
+    num_signals: int = NUM_SIGNALS,
+    max_samples: int = MAX_SAMPLES,
 ) -> None:
-    """Populate one HDF5 group with realistic signal data.
-
-    Dataset names are built as group_name + suffix.
     """
-    t = np.linspace(0, duration_sec, num_samples, dtype=np.float64)
+    Populate one HDF5 group as Type A.
 
-    # Pick a random subset of signals from the catalogue
-    indices = rng.choice(len(SIGNAL_CATALOGUE), size=min(num_signals, len(SIGNAL_CATALOGUE)), replace=False)
-    indices.sort()
-    actual_count = len(indices)
+    Type A: 200 signals, frequencies 1-100 Hz, variable n_samples per signal.
+    """
+    catalogue = _build_signal_catalogue(num_signals)
+
+    # Per-signal frequencies (1-100 Hz)
+    freqs = rng.uniform(1.0, 100.0, size=num_signals).astype(np.float64)
+
+    # Per-signal n_samples: random between 50% and 100% of max_samples
+    n_samples = rng.integers(max_samples // 2, max_samples + 1, size=num_signals).astype(np.int64)
+
+    # All signals share same starting epoch
+    epoch_times = np.full(num_signals, EPOCH_MS, dtype=np.float64)
 
     names = []
     units = []
-    values = np.empty((actual_count, num_samples), dtype=np.float64)
+    values = np.zeros((num_signals, max_samples), dtype=np.float64)
 
-    for row, cat_idx in enumerate(indices):
-        sig_name, sig_unit, gen_fn = SIGNAL_CATALOGUE[cat_idx]
-        values[row, :] = gen_fn(t, rng)
+    for i in range(num_signals):
+        sig_name, sig_unit, gen_fn = catalogue[i]
         names.append(sig_name)
         units.append(sig_unit)
 
-    # Per-signal start times (small random offsets from 0)
-    start_times = rng.uniform(0, 0.01, size=actual_count).astype(np.float64)
-    # Sampling frequency derived from duration and sample count
-    base_fs = float(num_samples) / duration_sec
-    samp_freqs = np.full(actual_count, base_fs, dtype=np.float64)
+        n = int(n_samples[i])
+        duration = n / freqs[i]
+        t = np.linspace(0, duration, n, dtype=np.float64)
+        values[i, :n] = gen_fn(t, rng)
+        # Remaining columns stay 0 (padding)
 
-    grp.create_dataset(S.ds(group_name, S.VALUE_SUFFIX), data=values)
-    grp.create_dataset(S.ds(group_name, S.TIME_SUFFIX), data=start_times)
-    grp.create_dataset(S.ds(group_name, S.SAMPLING_FREQ_SUFFIX), data=samp_freqs)
+    grp.create_dataset(S.ds(group_name, S.VALUE_SUFFIX), data=values, compression="gzip")
+    grp.create_dataset(S.ds(group_name, S.TIME_SUFFIX), data=epoch_times)
+    grp.create_dataset(S.ds(group_name, S.SAMPLING_FREQ_SUFFIX), data=freqs)
+    grp.create_dataset(S.ds(group_name, S.NSAMPLE_SUFFIX), data=n_samples)
     grp.create_dataset(S.ds(group_name, S.NAMES_SUFFIX), data=np.array(names, dtype="S64"))
     grp.create_dataset(S.ds(group_name, S.UNITS_SUFFIX), data=np.array(units, dtype="S32"))
+
+
+def generate_type_b_group(
+    grp: h5py.Group,
+    group_name: str,
+    rng: np.random.Generator,
+    num_signals: int = NUM_SIGNALS,
+    max_samples: int = MAX_SAMPLES,
+) -> None:
+    """
+    Populate one HDF5 group as Type B.
+
+    Type B: 200 signals, frequency=100 Hz, all 1,500,000 samples each.
+    Additional datasets: _ERR, _SQI, _TLS.
+    """
+    catalogue = _build_signal_catalogue(num_signals)
+
+    freq = 100.0
+    freqs = np.full(num_signals, freq, dtype=np.float64)
+    n_samples = np.full(num_signals, max_samples, dtype=np.int64)
+    epoch_times = np.full(num_signals, EPOCH_MS, dtype=np.float64)
+
+    duration = max_samples / freq
+    t = np.linspace(0, duration, max_samples, dtype=np.float64)
+
+    names = []
+    units = []
+    values = np.zeros((num_signals, max_samples), dtype=np.float64)
+    errors = np.zeros((num_signals, max_samples), dtype=np.float64)
+
+    for i in range(num_signals):
+        sig_name, sig_unit, gen_fn = catalogue[i]
+        names.append(sig_name)
+        units.append(sig_unit)
+        values[i, :] = gen_fn(t, rng)
+        # Error: small noise proportional to signal amplitude
+        errors[i, :] = rng.standard_normal(max_samples) * 0.01 * np.std(values[i, :])
+
+    sqi = rng.uniform(0.85, 1.0, size=num_signals).astype(np.float64)
+    tls = rng.uniform(0.0, 5.0, size=num_signals).astype(np.float64)
+
+    # Base datasets (same as Type A)
+    grp.create_dataset(S.ds(group_name, S.VALUE_SUFFIX), data=values, compression="gzip")
+    grp.create_dataset(S.ds(group_name, S.TIME_SUFFIX), data=epoch_times)
+    grp.create_dataset(S.ds(group_name, S.SAMPLING_FREQ_SUFFIX), data=freqs)
+    grp.create_dataset(S.ds(group_name, S.NSAMPLE_SUFFIX), data=n_samples)
+    grp.create_dataset(S.ds(group_name, S.NAMES_SUFFIX), data=np.array(names, dtype="S64"))
+    grp.create_dataset(S.ds(group_name, S.UNITS_SUFFIX), data=np.array(units, dtype="S32"))
+
+    # Type B additional datasets
+    grp.create_dataset(S.ds(group_name, S.ERROR_SUFFIX), data=errors, compression="gzip")
+    grp.create_dataset(S.ds(group_name, S.SQI_SUFFIX), data=sqi)
+    grp.create_dataset(S.ds(group_name, S.TLS_SUFFIX), data=tls)
 
 
 def generate_all(data_root: Path, seed: int = 42) -> None:
@@ -329,21 +397,23 @@ def generate_all(data_root: Path, seed: int = 42) -> None:
             filename = f"{folder1}_2024-06-{16 + f2_idx:02d}_{crc}{S.FILE_SUFFIX}"
             filepath = folder2_dir / filename
 
-            # Each folder_2 adds more signals
-            base_signals = 8
-            signals_this = min(base_signals + f2_idx * 4, len(SIGNAL_CATALOGUE))
-            samples = rng.integers(50_000, 150_001)
-            duration = rng.uniform(5.0, 30.0)
+            print(f"    {folder2}/{filename}  (generating...)", end="", flush=True)
 
             with h5py.File(filepath, "w") as f:
-                for group_name in S.GROUP_NAMES:
+                for i, group_name in enumerate(S.GROUP_NAMES):
                     grp = f.create_group(group_name)
-                    generate_group(grp, group_name, rng, signals_this, int(samples), duration)
+                    if i == 0:
+                        # First group → Type A
+                        generate_type_a_group(grp, group_name, rng)
+                    else:
+                        # Other groups → Type B
+                        generate_type_b_group(grp, group_name, rng)
 
             size_mb = filepath.stat().st_size / (1024 * 1024)
-            n_groups = len(S.GROUP_NAMES)
-            print(f"    {folder2}/{filename}  ({n_groups} groups, "
-                  f"{signals_this} signals, {samples} samples, {size_mb:.1f} MB)")
+            print(f"\r    {folder2}/{filename}  "
+                  f"({len(S.GROUP_NAMES)} groups, "
+                  f"{NUM_SIGNALS} signals, {MAX_SAMPLES} max_samples, "
+                  f"{size_mb:.1f} MB)")
             total_files += 1
 
     print(f"\nGenerated {total_files} HDF5 files in {data_root}")

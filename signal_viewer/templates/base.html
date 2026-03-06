@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{% block title %}Signal Viewer{% endblock %}</title>
-  <link rel="stylesheet" href="/static/css/theme.css?v=12">
+  <link rel="stylesheet" href="/static/css/theme.css?v=25">
   <script src="/static/js/vendor/plotly.min.js"></script>
   {% block extra_head %}{% endblock %}
 </head>
@@ -47,8 +47,10 @@
   <!-- Loading Overlay -->
   <div class="loading-overlay" id="loadingOverlay">
     <div class="loading-content">
-      <div class="loading-spinner"></div>
       <div class="loading-text" id="loadingText">Loading...</div>
+      <div class="loading-bar-track">
+        <div class="loading-bar-fill" id="loadingBarFill"></div>
+      </div>
     </div>
   </div>
 
@@ -71,7 +73,7 @@
     </main>
   </div>
 
-  <script src="/static/js/app.js?v=12"></script>
+  <script src="/static/js/app.js?v=22"></script>
   <script>
   (function() {
     const path = window.location.pathname;

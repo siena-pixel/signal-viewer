@@ -22,7 +22,7 @@ CACHE_MAX_MEMORY_MB = int(os.environ.get('SIGNAL_VIEWER_CACHE_MB', '500'))
 CACHE_MAX_MEMORY_BYTES = CACHE_MAX_MEMORY_MB * 1024 * 1024
 
 # Processing defaults
-DEFAULT_DOWNSAMPLE_POINTS = 2000
+DEFAULT_DOWNSAMPLE_POINTS = 5000
 MAX_DOWNSAMPLE_POINTS = 10000
 
 # UI
@@ -46,19 +46,26 @@ class HDF5Schema:
 
     HDF5 internal layout (per group):
       /GROUP_NAME/
-          GROUP_NAME_V   float64 [num_signals, max_samples]  signal values
-          GROUP_NAME_T   float64 [num_signals]               start time per signal
-          GROUP_NAME_FS  float64 [num_signals]               sampling freq per signal
-          GROUP_NAME_NS  int64   [num_signals]  (optional)   valid sample count
-          GROUP_NAME_N   str     [num_signals]               signal names
-          GROUP_NAME_U   str     [num_signals]               units
+          GROUP_NAME_V    float64 [n_signals, max(n_samples)]  signal values
+          GROUP_NAME_TIM  float64 [n_signals]  epoch time (ms) of first sample
+          GROUP_NAME_FRE  float64 [n_signals]  sampling frequency (Hz)
+          GROUP_NAME_SAM  int64   [n_signals]  valid sample count per signal
+          GROUP_NAME_N    str     [n_signals]  signal names
+          GROUP_NAME_UNI  str     [n_signals]  units
+
+      Type B groups additionally contain:
+          GROUP_NAME_ERR  float64 [n_signals, max(n_samples)]  signal errors
+          GROUP_NAME_SQI  float64 [n_signals]  signal quality metric
+          GROUP_NAME_TLS  float64 [n_signals]  max error gap (seconds)
 
     Batch types:
-      - Type A: _NS dataset exists → each signal has n_sample[i] valid points
-      - Type B: _NS dataset absent → full value matrix is valid (rectangular)
+      - Type A: only the base datasets above
+      - Type B: base datasets + _ERR, _SQI, _TLS
+      Both types have _SAM (valid sample count per signal).
 
     Time construction (both types):
-      time[i] = T[i] + arange(length) / FS[i]
+      time[i] = TIM[i] + arange(length) / FRE[i]
+      where TIM is epoch time in milliseconds.
     """
 
     # -- Filesystem conventions -----------------------------------------------
@@ -71,12 +78,18 @@ class HDF5Schema:
     GROUP_NAMES = ['GROUP_T0', 'GROUP_T1']  # top-level groups to read
 
     # -- Dataset suffix convention (appended to group name) -------------------
-    VALUE_SUFFIX         = '_V'      # float64 [num_signals, max_samples]
-    TIME_SUFFIX          = '_T'      # float64 [num_signals]  start time
-    SAMPLING_FREQ_SUFFIX = '_FS'     # float64 [num_signals]  sampling frequency
-    NSAMPLE_SUFFIX       = '_NS'     # int64   [num_signals]  valid sample count (Type A)
-    NAMES_SUFFIX         = '_N'      # str     [num_signals]  signal names
-    UNITS_SUFFIX         = '_U'      # str     [num_signals]  units
+    # Common to both Type A and Type B:
+    VALUE_SUFFIX         = '_V'      # float64 [n_signals, max(n_samples)]
+    TIME_SUFFIX          = '_TIM'    # float64 [n_signals]  epoch ms of first sample
+    SAMPLING_FREQ_SUFFIX = '_FRE'    # float64 [n_signals]  sampling frequency (Hz)
+    NSAMPLE_SUFFIX       = '_SAM'    # int64   [n_signals]  valid sample count
+    NAMES_SUFFIX         = '_N'      # str     [n_signals]  signal names
+    UNITS_SUFFIX         = '_UNI'    # str     [n_signals]  units
+
+    # Type B additional datasets:
+    ERROR_SUFFIX         = '_ERR'    # float64 [n_signals, max(n_samples)]  errors
+    SQI_SUFFIX           = '_SQI'    # float64 [n_signals]  signal quality index
+    TLS_SUFFIX           = '_TLS'    # float64 [n_signals]  max error gap (seconds)
 
     # -- Default group for tests / mocks --------------------------------------
     DEFAULT_GROUP   = 'GROUP_T0'

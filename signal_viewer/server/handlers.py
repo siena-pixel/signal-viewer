@@ -8,6 +8,7 @@ Includes:
 """
 
 import base64
+import concurrent.futures
 import json
 import logging
 import traceback
@@ -15,8 +16,12 @@ from pathlib import Path
 from typing import Optional
 
 import numpy as np
+import tornado.ioloop
 import tornado.web
 import tornado.iostream
+
+# Shared thread pool for CPU-heavy handlers (correlation, statistics, etc.)
+_COMPUTE_EXECUTOR = concurrent.futures.ThreadPoolExecutor(max_workers=2)
 
 from signal_viewer import config
 from signal_viewer.core.hdf5_reader import HDF5Reader
@@ -335,74 +340,108 @@ class BatchMetaHandler(BaseHandler):
 
 
 class SignalHandler(BaseHandler):
-    """GET /api/files/{encoded_path}/batches/{batch}/signals/{idx} → Signal data."""
+    """GET /api/files/{encoded_path}/batches/{batch}/signals/{idx} → Signal data.
+
+    Supports adaptive-zoom by accepting an optional time window:
+      ?downsample=N           target point count (default 5000, max 10000)
+      &t_min=<epoch_ms>       left edge of visible window
+      &t_max=<epoch_ms>       right edge of visible window
+
+    When t_min / t_max are given, the server slices the full (cached) signal
+    to that window and downsamples only the slice — giving the browser
+    pixel-level detail at any zoom level while never exceeding N points.
+
+    The first request (no t_min/t_max) additionally returns ``total_samples``,
+    ``t_start``, and ``t_end`` so the frontend knows the full signal extent.
+    """
 
     def get(self, encoded_path: str, batch: str, signal_idx: str):
-        """
-        Load a signal with optional downsampling.
-
-        Query parameters:
-          - downsample: Target number of points (default: 2000, max: 10000)
-
-        Args:
-            encoded_path: Base64-encoded file path
-            batch: Batch name
-            signal_idx: Signal index (0-based)
-        """
         try:
             file_path = self.decode_file_path(encoded_path)
             reader = self.get_hdf5_reader(file_path)
             idx = int(signal_idx)
 
-            # Get cache key
+            # ── Load full signal (from cache or HDF5) ────────────────────
             cache_key = f"{file_path}::{batch}::{idx}"
-
-            # Check cache first
             cached = self.application.signal_cache.get(cache_key)
             if cached is not None:
-                time, signal = cached
+                time_full, signal_full = cached
             else:
-                # Load from file
-                time, signal = reader.load_signal(batch, idx)
-                # Cache the full signal
-                self.application.signal_cache.put(cache_key, time, signal)
+                time_full, signal_full = reader.load_signal(batch, idx)
+                self.application.signal_cache.put(
+                    cache_key, time_full, signal_full
+                )
 
-            # Apply downsampling if requested
+            total_samples = len(signal_full)
+            t_start = float(time_full[0])
+            t_end = float(time_full[-1])
+
+            # ── Optional time-window slice ────────────────────────────────
+            t_min_param = self.get_argument("t_min", None)
+            t_max_param = self.get_argument("t_max", None)
+            is_windowed = False
+
+            if t_min_param is not None and t_max_param is not None:
+                try:
+                    t_min = float(t_min_param)
+                    t_max = float(t_max_param)
+                    if t_min < t_max:
+                        # Binary-search for slice boundaries
+                        i_lo = int(np.searchsorted(time_full, t_min, side="left"))
+                        i_hi = int(np.searchsorted(time_full, t_max, side="right"))
+                        # Expand by 1 on each side for smooth edges
+                        i_lo = max(0, i_lo - 1)
+                        i_hi = min(total_samples, i_hi + 1)
+                        time_full = time_full[i_lo:i_hi]
+                        signal_full = signal_full[i_lo:i_hi]
+                        is_windowed = True
+                except (ValueError, TypeError):
+                    pass
+
+            # ── Downsample ────────────────────────────────────────────────
             downsample_param = self.get_argument("downsample", None)
             if downsample_param:
                 try:
                     target_points = int(downsample_param)
-                    # Clamp to bounds
                     target_points = min(
                         max(target_points, 10), config.MAX_DOWNSAMPLE_POINTS
                     )
-                    time, signal = resampling.lttb_downsample(
-                        time, signal, target_points
-                    )
+                    if len(signal_full) > target_points:
+                        time_full, signal_full = (
+                            resampling.minmax_lttb_downsample(
+                                time_full, signal_full, target_points
+                            )
+                        )
                 except (ValueError, TypeError):
                     pass
 
-            # Get signal metadata
+            # ── Metadata ──────────────────────────────────────────────────
             batch_meta = reader.get_batch_metadata(batch)
             signal_name = batch_meta["signal_names"][idx]
             units = batch_meta["units"][idx]
 
-            self.write_json(
-                {
-                    "time": time,
-                    "values": signal,
-                    "name": signal_name,
-                    "units": units,
-                    "samples": len(signal),
-                }
-            )
+            result = {
+                "time": time_full,
+                "values": signal_full,
+                "name": signal_name,
+                "units": units,
+                "samples": len(signal_full),
+                "total_samples": total_samples,
+                "t_start": t_start,
+                "t_end": t_end,
+                "windowed": is_windowed,
+            }
+
+            self.write_json(result)
         except tornado.web.HTTPError:
             raise
         except (ValueError, IndexError) as e:
             raise tornado.web.HTTPError(404, str(e))
         except Exception as e:
             if config.VERBOSE:
-                logger.error(f"Error in SignalHandler: {e}\n{traceback.format_exc()}")
+                logger.error(
+                    f"Error in SignalHandler: {e}\n{traceback.format_exc()}"
+                )
             else:
                 logger.error(f"Error in SignalHandler: {e}")
             raise tornado.web.HTTPError(500, str(e))
@@ -411,9 +450,17 @@ class SignalHandler(BaseHandler):
 
 
 class StatsHandler(BaseHandler):
-    """POST /api/analysis/stats → Compute signal statistics."""
+    """POST /api/analysis/stats → Compute signal statistics.
 
-    def post(self):
+    Returns descriptive stats, pre-computed rainflow visualisation data
+    (histogram, exceedance curves, percentile table) and an optional
+    downsampled copy of the signal values for the value histogram.
+
+    Heavy computation is offloaded to a thread-pool executor so the
+    Tornado event loop stays responsive.
+    """
+
+    async def post(self):
         """
         Compute descriptive statistics and rainflow cycle counting for a signal.
 
@@ -422,11 +469,13 @@ class StatsHandler(BaseHandler):
           "file_path": "/path/to/file.h5",
           "batch": "batch_001",
           "signal_idx": 0,
-          "rainflow_bins": 10
+          "rainflow_bins": 10,
+          "include_signal": 5000       ← optional: downsample target
         }
 
-        Optional parameters:
-          - rainflow_bins: Number of bins for rainflow histogram (default: 10)
+        When *include_signal* is given the response includes a ``values``
+        key with the downsampled signal, removing the need for a second
+        GET request from the frontend.
         """
         try:
             data = json.loads(self.request.body)
@@ -434,6 +483,7 @@ class StatsHandler(BaseHandler):
             batch = data.get("batch")
             signal_idx = int(data.get("signal_idx", 0))
             rainflow_bins = int(data.get("rainflow_bins", 10))
+            include_signal = data.get("include_signal")  # int or None
 
             if not file_path or not batch:
                 raise tornado.web.HTTPError(400, "Missing required fields")
@@ -442,19 +492,22 @@ class StatsHandler(BaseHandler):
                 raise tornado.web.HTTPError(400, "rainflow_bins must be >= 1")
 
             reader = self.get_hdf5_reader(file_path)
-            time, signal = reader.load_signal(batch, signal_idx)
+            time_arr, signal = reader.load_signal(batch, signal_idx)
 
-            # Compute descriptive statistics
-            stats = statistics.compute_descriptive_stats(signal)
+            # Populate the signal cache so any subsequent GET is a hit
+            cache_key = f"{file_path}::{batch}::{signal_idx}"
+            self.application.signal_cache.put(cache_key, time_arr, signal)
 
-            # Compute rainflow cycle counting
-            rainflow_data = statistics.compute_rainflow(signal, n_bins=rainflow_bins)
-
-            # Combine results
-            result = {
-                **stats,
-                "rainflow": rainflow_data,
-            }
+            # Offload heavy computation to thread pool
+            loop = tornado.ioloop.IOLoop.current()
+            result = await loop.run_in_executor(
+                _COMPUTE_EXECUTOR,
+                self._compute_stats,
+                signal,
+                rainflow_bins,
+                int(include_signal) if include_signal else 0,
+                time_arr,
+            )
 
             self.write_json(result)
         except tornado.web.HTTPError:
@@ -466,11 +519,157 @@ class StatsHandler(BaseHandler):
                 logger.error(f"Error in StatsHandler: {e}")
             raise tornado.web.HTTPError(500, str(e))
 
+    @staticmethod
+    def _compute_stats(signal, rainflow_bins, downsample_target, time_arr):
+        """Pure-computation helper executed in a thread."""
+        stats = statistics.compute_descriptive_stats(signal)
+        rf = statistics.compute_rainflow(signal, n_bins=rainflow_bins)
+
+        # ── Pre-compute visualisation data so the frontend doesn't ──
+        # ── need the full ranges/cycle_maxs/cycle_mins arrays.     ──
+        rainflow_vis = StatsHandler._build_rainflow_vis(rf)
+
+        result = {**stats, "rainflow": rainflow_vis}
+
+        # Optionally include downsampled signal values
+        if downsample_target and downsample_target > 0:
+            target = min(max(downsample_target, 10), config.MAX_DOWNSAMPLE_POINTS)
+            if len(signal) > target:
+                _, ds_signal = resampling.lttb_downsample(
+                    time_arr, signal, target
+                )
+                result["values"] = ds_signal.tolist()
+            else:
+                result["values"] = signal.tolist()
+
+        return result
+
+    @staticmethod
+    def _build_rainflow_vis(rf):
+        """Convert raw rainflow output into compact visualisation payload.
+
+        Returns a dict with histogram (counts, bin_edges), percentile
+        table, exceedance curves (downsampled to ≤500 pts), and summary
+        scalars.  The bulky ranges/cycle_maxs/cycle_mins arrays are NOT
+        included — saving potentially megabytes of JSON.
+        """
+        vis = {
+            "counts": rf["counts"],
+            "bin_edges": rf["bin_edges"],
+            "total_cycles": rf["total_cycles"],
+            "total_half_cycles": rf["total_half_cycles"],
+        }
+
+        ranges = rf.get("ranges", [])
+        cycle_maxs = rf.get("cycle_maxs", [])
+        cycle_mins = rf.get("cycle_mins", [])
+
+        # Max range
+        vis["maxRange"] = max(ranges) if ranges else None
+
+        # Percentile table (every 10th percentile)
+        if ranges:
+            sorted_r = sorted(ranges)
+            n = len(sorted_r)
+            ptable = []
+            for p in range(10, 101, 10):
+                idx = min(int(p / 100 * n), n - 1)
+                val = sorted_r[idx]
+                # Count cycles with range >= val
+                # (binary search on sorted array)
+                lo, hi = 0, n
+                while lo < hi:
+                    mid = (lo + hi) // 2
+                    if sorted_r[mid] < val:
+                        lo = mid + 1
+                    else:
+                        hi = mid
+                count = n - lo
+                ptable.append({"percentile": p, "value": val, "count": count})
+            vis["percentiles"] = ptable
+        else:
+            vis["percentiles"] = []
+
+        # Exceedance curves (downsampled to ≤500 points)
+        MAX_PTS = 500
+        vis["rangeExceedance"] = StatsHandler._exceedance_desc(ranges, MAX_PTS)
+        vis["maxExceedance"] = StatsHandler._exceedance_desc(cycle_maxs, MAX_PTS)
+        vis["minExceedance"] = StatsHandler._exceedance_asc(cycle_mins, MAX_PTS)
+
+        return vis
+
+    @staticmethod
+    def _exceedance_desc(values, max_pts):
+        """Build descending exceedance curve: cycles with value ≥ threshold."""
+        if not values:
+            return None
+        sorted_v = sorted(values, reverse=True)
+        n = len(sorted_v)
+        thresholds, counts = [], []
+        prev = None
+        for i, v in enumerate(sorted_v):
+            if v != prev:
+                thresholds.append(v)
+                counts.append(i + 1)
+                prev = v
+        if counts and counts[-1] != n:
+            thresholds.append(sorted_v[-1])
+            counts.append(n)
+        return StatsHandler._downsample_curve(counts, thresholds, max_pts)
+
+    @staticmethod
+    def _exceedance_asc(values, max_pts):
+        """Build ascending exceedance curve: cycles with value ≤ threshold."""
+        if not values:
+            return None
+        sorted_v = sorted(values)
+        n = len(sorted_v)
+        thresholds, counts = [], []
+        prev = None
+        for i, v in enumerate(sorted_v):
+            if v != prev:
+                thresholds.append(v)
+                counts.append(i + 1)
+                prev = v
+        if counts and counts[-1] != n:
+            thresholds.append(sorted_v[-1])
+            counts.append(n)
+        return StatsHandler._downsample_curve(counts, thresholds, max_pts)
+
+    @staticmethod
+    def _downsample_curve(x_arr, y_arr, max_pts):
+        """Log-spaced downsample of an exceedance curve."""
+        n = len(x_arr)
+        if n <= max_pts:
+            return {"x": x_arr, "y": y_arr}
+        import math
+        indices = set()
+        indices.add(0)
+        indices.add(n - 1)
+        log_max = math.log(n)
+        for i in range(1, max_pts - 1):
+            log_idx = log_max * i / (max_pts - 1)
+            idx = min(round(math.exp(log_idx)) - 1, n - 1)
+            indices.add(idx)
+        sorted_idx = sorted(indices)
+        return {
+            "x": [x_arr[i] for i in sorted_idx],
+            "y": [y_arr[i] for i in sorted_idx],
+        }
+
 
 class CorrelationHandler(BaseHandler):
-    """POST /api/analysis/correlation → Compute cross-correlation."""
+    """POST /api/analysis/correlation → Compute cross-correlation.
 
-    def post(self):
+    Heavy computation is offloaded to a thread-pool executor so that
+    Tornado's event loop stays responsive for other requests.
+    """
+
+    # Cap the number of samples fed into np.correlate to keep the
+    # computation tractable (~10 K points → finishes in < 1 s).
+    MAX_CORR_SAMPLES = 10_000
+
+    async def post(self):
         """
         Compute cross-correlation between two signals.
 
@@ -507,21 +706,27 @@ class CorrelationHandler(BaseHandler):
             signal_a = signal_a[:min_len]
             signal_b = signal_b[:min_len]
 
-            # Compute cross-correlation
-            lags, corr = correlation.cross_correlate(
-                signal_a, signal_b, mode="same"
+            # Down-sample large signals to keep correlation tractable.
+            # LTTB would be ideal but a simple uniform stride is sufficient
+            # for a correlation overview.
+            cap = self.MAX_CORR_SAMPLES
+            if min_len > cap:
+                stride = max(1, min_len // cap)
+                signal_a = signal_a[::stride].copy()
+                signal_b = signal_b[::stride].copy()
+
+            # Offload the CPU-heavy computation to a thread so we don't
+            # block the Tornado event loop (which would freeze all other
+            # HTTP handlers until this returns).
+            loop = tornado.ioloop.IOLoop.current()
+            result = await loop.run_in_executor(
+                _COMPUTE_EXECUTOR,
+                self._compute_correlation,
+                signal_a,
+                signal_b,
             )
 
-            # Find lag at maximum correlation
-            max_lag = correlation.find_lag(signal_a, signal_b)
-
-            self.write_json(
-                {
-                    "lags": lags,
-                    "correlation": corr,
-                    "max_lag": max_lag,
-                }
-            )
+            self.write_json(result)
         except tornado.web.HTTPError:
             raise
         except Exception as e:
@@ -530,6 +735,19 @@ class CorrelationHandler(BaseHandler):
             else:
                 logger.error(f"Error in CorrelationHandler: {e}")
             raise tornado.web.HTTPError(500, str(e))
+
+    @staticmethod
+    def _compute_correlation(signal_a, signal_b):
+        """Pure-computation helper executed in a thread."""
+        lags, corr = correlation.cross_correlate(
+            signal_a, signal_b, mode="same"
+        )
+        max_lag = correlation.find_lag(signal_a, signal_b)
+        return {
+            "lags": lags,
+            "correlation": corr,
+            "max_lag": max_lag,
+        }
 
 
 class TrendHandler(BaseHandler):

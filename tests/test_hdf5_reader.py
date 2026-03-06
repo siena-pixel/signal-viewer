@@ -105,27 +105,59 @@ class TestMockHDF5File(unittest.TestCase):
             mock_file.close()
 
     def test_mock_type_a_has_nsample(self):
-        """Test that first group (Type A) has _NS dataset."""
+        """Test that first group (Type A) has _SAM dataset."""
         with tempfile.TemporaryDirectory() as tmpdir:
             file_path = Path(tmpdir) / "test.h5"
             file_path.touch()
 
             mock_file = MockHDF5File(str(file_path), mode="r")
             group = mock_file[S.GROUP_NAMES[0]]
-            ds_ns = S.ds(S.GROUP_NAMES[0], S.NSAMPLE_SUFFIX)
-            self.assertIn(ds_ns, group)
+            ds_sam = S.ds(S.GROUP_NAMES[0], S.NSAMPLE_SUFFIX)
+            self.assertIn(ds_sam, group)
             mock_file.close()
 
-    def test_mock_type_b_no_nsample(self):
-        """Test that second group (Type B) has no _NS dataset."""
+    def test_mock_type_a_no_error_datasets(self):
+        """Test that first group (Type A) has no _ERR/_SQI/_TLS datasets."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = Path(tmpdir) / "test.h5"
+            file_path.touch()
+
+            mock_file = MockHDF5File(str(file_path), mode="r")
+            group = mock_file[S.GROUP_NAMES[0]]
+            ds_err = S.ds(S.GROUP_NAMES[0], S.ERROR_SUFFIX)
+            ds_sqi = S.ds(S.GROUP_NAMES[0], S.SQI_SUFFIX)
+            ds_tls = S.ds(S.GROUP_NAMES[0], S.TLS_SUFFIX)
+            self.assertNotIn(ds_err, group)
+            self.assertNotIn(ds_sqi, group)
+            self.assertNotIn(ds_tls, group)
+            mock_file.close()
+
+    def test_mock_type_b_has_nsample(self):
+        """Test that second group (Type B) also has _SAM dataset."""
         with tempfile.TemporaryDirectory() as tmpdir:
             file_path = Path(tmpdir) / "test.h5"
             file_path.touch()
 
             mock_file = MockHDF5File(str(file_path), mode="r")
             group = mock_file[S.GROUP_NAMES[1]]
-            ds_ns = S.ds(S.GROUP_NAMES[1], S.NSAMPLE_SUFFIX)
-            self.assertNotIn(ds_ns, group)
+            ds_sam = S.ds(S.GROUP_NAMES[1], S.NSAMPLE_SUFFIX)
+            self.assertIn(ds_sam, group)
+            mock_file.close()
+
+    def test_mock_type_b_has_error_datasets(self):
+        """Test that second group (Type B) has _ERR, _SQI, _TLS datasets."""
+        with tempfile.TemporaryDirectory() as tmpdir:
+            file_path = Path(tmpdir) / "test.h5"
+            file_path.touch()
+
+            mock_file = MockHDF5File(str(file_path), mode="r")
+            group = mock_file[S.GROUP_NAMES[1]]
+            ds_err = S.ds(S.GROUP_NAMES[1], S.ERROR_SUFFIX)
+            ds_sqi = S.ds(S.GROUP_NAMES[1], S.SQI_SUFFIX)
+            ds_tls = S.ds(S.GROUP_NAMES[1], S.TLS_SUFFIX)
+            self.assertIn(ds_err, group)
+            self.assertIn(ds_sqi, group)
+            self.assertIn(ds_tls, group)
             mock_file.close()
 
 
@@ -268,14 +300,25 @@ class TestHDF5Reader(unittest.TestCase):
         self.assertIsNotNone(meta["n_samples"])
         self.assertEqual(len(meta["n_samples"]), 4)
         self.assertEqual(meta["n_samples"], [800, 600, 900, 750])
+        # Type A should not have sqi/tls
+        self.assertNotIn("sqi", meta)
+        self.assertNotIn("tls", meta)
         reader.close()
 
     def test_get_group_metadata_type_b(self):
-        """Test Type B group has batch_type B and n_samples is None."""
+        """Test Type B group has batch_type B, n_samples, and sqi/tls."""
         reader = HDF5Reader(str(self.test_file))
         meta = reader.get_group_metadata(S.GROUP_NAMES[1])
         self.assertEqual(meta["batch_type"], "B")
-        self.assertIsNone(meta["n_samples"])
+        # Type B also has _SAM
+        self.assertIsNotNone(meta["n_samples"])
+        self.assertEqual(len(meta["n_samples"]), 4)
+        self.assertEqual(meta["n_samples"], [800, 600, 900, 750])
+        # Type B has sqi and tls
+        self.assertIn("sqi", meta)
+        self.assertIn("tls", meta)
+        self.assertEqual(len(meta["sqi"]), 4)
+        self.assertEqual(len(meta["tls"]), 4)
         reader.close()
 
     def test_get_group_metadata_invalid(self):
@@ -300,32 +343,33 @@ class TestHDF5Reader(unittest.TestCase):
         reader.close()
 
     def test_load_signal_type_b(self):
-        """Test Type B: full row (1000 samples)."""
+        """Test Type B: signal also truncated to n_sample[idx] (both types have _SAM)."""
         reader = HDF5Reader(str(self.test_file))
         group_b = S.GROUP_NAMES[1]
 
+        # Type B also uses _SAM: signal 0 has n_sample=800
         time, signal = reader.load_signal(group_b, 0)
-        self.assertEqual(len(signal), 1000)
-        self.assertEqual(len(time), 1000)
+        self.assertEqual(len(signal), 800)
+        self.assertEqual(len(time), 800)
         reader.close()
 
     def test_time_construction(self):
-        """Test time = t0 + arange(n) / fs for both types."""
+        """Test time = t0 + arange(n) * (1000/fs) for both types."""
         reader = HDF5Reader(str(self.test_file))
 
-        # Type A, signal 0: t0=0.0, fs=100.0, n=800
+        # Type A, signal 0: t0=1700000000000.0 (epoch ms), fs=100.0, n=800
         time, _ = reader.load_signal(S.GROUP_NAMES[0], 0)
-        expected = 0.0 + np.arange(800, dtype=np.float64) / 100.0
+        expected = 1700000000000.0 + np.arange(800, dtype=np.float64) * (1000.0 / 100.0)
         np.testing.assert_allclose(time, expected, rtol=1e-12)
 
-        # Type A, signal 1: t0=0.5, fs=200.0, n=600
+        # Type A, signal 1: t0=1700000000000.0, fs=200.0, n=600
         time, _ = reader.load_signal(S.GROUP_NAMES[0], 1)
-        expected = 0.5 + np.arange(600, dtype=np.float64) / 200.0
+        expected = 1700000000000.0 + np.arange(600, dtype=np.float64) * (1000.0 / 200.0)
         np.testing.assert_allclose(time, expected, rtol=1e-12)
 
-        # Type B, signal 3: t0=2.0, fs=500.0, n=1000
+        # Type B, signal 3: t0=1700000000000.0, fs=500.0, n=750
         time, _ = reader.load_signal(S.GROUP_NAMES[1], 3)
-        expected = 2.0 + np.arange(1000, dtype=np.float64) / 500.0
+        expected = 1700000000000.0 + np.arange(750, dtype=np.float64) * (1000.0 / 500.0)
         np.testing.assert_allclose(time, expected, rtol=1e-12)
 
         reader.close()
@@ -375,10 +419,11 @@ class TestHDF5Reader(unittest.TestCase):
         reader.close()
 
     def test_get_signal_stats_type_b(self):
-        """Test stats for Type B uses full row."""
+        """Test stats for Type B also uses _SAM truncation."""
         reader = HDF5Reader(str(self.test_file))
         stats = reader.get_signal_stats(S.GROUP_NAMES[1], 0)
-        self.assertEqual(stats["samples"], 1000)
+        # Type B also has _SAM: signal 0 → 800 valid samples
+        self.assertEqual(stats["samples"], 800)
         reader.close()
 
     def test_get_signal_stats_invalid_index(self):

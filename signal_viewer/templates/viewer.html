@@ -14,6 +14,8 @@
       </select>
     </div>
     <div class="flex-1"></div>
+    <span id="zoomIndicator" class="zoom-indicator" style="display:none"></span>
+    <button id="resetZoomBtn" class="btn btn-secondary btn-sm" onclick="_resetToOverview()" style="display:none">Reset Zoom</button>
     <button class="btn btn-secondary btn-sm" onclick="clearAll()">Clear All</button>
   </div>
   <div id="signalCards" class="signal-cards-row"></div>
@@ -30,29 +32,171 @@
 {% block extra_js %}
 <script>
 // ============================================================================
-// VIEWER MODULE
+// VIEWER MODULE — ADAPTIVE ZOOM  (v3 – linear axis, zero timezone ambiguity)
 // ============================================================================
 
 const MAX_SIGNALS = 5;
 const OVERLAY_HEIGHT = 520;
 const SUBPLOT_HEIGHT_PER = 300;
+const ZOOM_DOWNSAMPLE = 5000;          // points per zoom request
+const ZOOM_DEBOUNCE_MS = 150;          // debounce zoom re-fetches
 
 let plotMode = 'overlay';
-const signals = [];  // { batch, idx, name, units, time, values, color }
-let _plotEl = null;  // reference to plot div for crosshair updates
 
 /**
- * Detect time units from an array of time values.
- * Returns { label, short } e.g. { label: 'Time (s)', short: 's' }
+ * Signal object:
+ * {
+ *   batch, idx, name, units, color,
+ *   timeRaw:      number[],  // epoch ms — CURRENT view (downsampled)
+ *   values:       number[],  // signal values of CURRENT view
+ *   totalSamples: number,    // full signal sample count
+ *   tStart:       number,    // epoch ms of first sample (full signal)
+ *   tEnd:         number,    // epoch ms of last sample  (full signal)
+ * }
+ *
+ * NOTE: Plotly receives timeRaw (epoch ms numbers) on a type:'linear' axis
+ * with custom tickvals/ticktext for human-readable time labels.  This fully
+ * eliminates timezone-parsing bugs: Plotly never converts to/from date strings,
+ * so relayout events return pure numbers with zero offset drift.
  */
-function detectTimeUnits(timeArr) {
-  if (!timeArr || timeArr.length < 2) return { label: 'Time (s)', short: 's' };
-  const tMax = timeArr[timeArr.length - 1];
-  const tMin = timeArr[0];
-  const span = Math.abs(tMax - tMin);
-  if (span < 0.5)   return { label: 'Time (ms)', short: 'ms' };
-  if (span > 7200)   return { label: 'Time (min)', short: 'min' };
-  return { label: 'Time (s)', short: 's' };
+const signals = [];
+
+let _plotEl = null;
+let _zoomTimer = null;
+let _zoomAbort = null;   // AbortController for in-flight zoom fetches
+let _isZoomFetching = false;
+let _lastFetchedRange = null;    // { tMin, tMax } or null (full overview)
+let _lastPlotRange = null;       // { lo, hi } — x range set by last Plotly.newPlot (echo detection)
+let _lastPlotTime = 0;           // Date.now() of last Plotly.newPlot call
+
+/**
+ * Custom modebar button that resets to full overview.
+ * We MUST replace Plotly's built-in "Reset axes" and "Autoscale" buttons
+ * because Plotly.newPlot() resets the "initial state" to the zoomed layout,
+ * making the built-in buttons reset to the zoomed view (not overview).
+ */
+const _resetModebarBtn = {
+  name: 'Reset zoom (full signal)',
+  icon: {
+    width: 1000, height: 1000,
+    path: 'M500 925L75 550h125v-400h225V425h150v-275h225V550h125L500 925z',
+    ascent: 950, descent: -50
+  },
+  click: function() { _resetToOverview(); }
+};
+
+/** Shared Plotly config — removes broken built-in buttons, adds our reset. */
+const _PLOTLY_CFG = {
+  responsive: true,
+  displayModeBar: true,
+  displaylogo: false,
+  showLink: false,
+  modeBarButtonsToRemove: ['lasso2d', 'select2d', 'resetScale2d', 'autoScale2d'],
+  modeBarButtonsToAdd: [_resetModebarBtn]
+};
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+
+/**
+ * Build custom tick labels for a linear x-axis that displays epoch ms as
+ * human-readable time strings.  Returns { tickvals, ticktext } for the
+ * given [lo, hi] epoch ms range.  Uses ~8-12 nicely spaced ticks.
+ *
+ * By using a LINEAR axis with custom ticks we eliminate ALL date-string
+ * parsing by Plotly, which was the root cause of the ±1 h timezone drift
+ * on zoom cycles.
+ */
+function _buildTimeTicks(lo, hi) {
+  if (!isFinite(lo) || !isFinite(hi) || lo >= hi) return {};
+
+  const span = hi - lo;
+  // Choose a "nice" tick step in ms
+  const niceSteps = [
+    1, 2, 5, 10, 20, 50, 100, 200, 500,            // sub-second
+    1000, 2000, 5000, 10000, 15000, 30000,           // seconds
+    60000, 120000, 300000, 600000, 900000, 1800000,   // minutes
+    3600000, 7200000, 14400000, 21600000, 43200000,   // hours
+    86400000, 172800000, 604800000                    // days
+  ];
+  const rawStep = span / 10;
+  let step = niceSteps[niceSteps.length - 1];
+  for (let i = 0; i < niceSteps.length; i++) {
+    if (niceSteps[i] >= rawStep) { step = niceSteps[i]; break; }
+  }
+
+  const first = Math.ceil(lo / step) * step;
+  const tickvals = [];
+  const ticktext = [];
+  for (let v = first; v <= hi; v += step) {
+    tickvals.push(v);
+    ticktext.push(_tickLabel(v, step));
+  }
+  return { tickvals, ticktext };
+}
+
+/** Format a single tick label based on the tick step size. */
+function _tickLabel(ms, step) {
+  const d = new Date(ms);
+  const pad = (n) => String(n).padStart(2, '0');
+  const H = pad(d.getUTCHours());
+  const M = pad(d.getUTCMinutes());
+  const S = pad(d.getUTCSeconds());
+  const ms_ = d.getUTCMilliseconds();
+
+  if (step >= 86400000) {
+    // Day-level ticks: show date
+    return `${d.getUTCFullYear()}/${pad(d.getUTCMonth()+1)}/${pad(d.getUTCDate())}`;
+  }
+  if (step >= 60000) {
+    // Minute-level: H:M:S
+    return `${H}:${M}:${S}`;
+  }
+  if (step >= 1000) {
+    // Second-level: H:M:S
+    return `${H}:${M}:${S}`;
+  }
+  // Sub-second: H:M:S.mmm
+  return `${H}:${M}:${S}.${String(ms_).padStart(3, '0')}`;
+}
+
+function formatEpochMs(ms) {
+  const d = new Date(ms);
+  const pad = (n) => String(n).padStart(2, '0');
+  // Seconds with 4 decimal places (sub-ms precision from float64 epoch ms)
+  const sec = d.getUTCSeconds();
+  const frac = (d.getUTCMilliseconds() + (ms - Math.floor(ms))) / 1000;
+  const secStr = (sec + frac).toFixed(4).padStart(7, '0');
+  return `${d.getUTCFullYear()}/${pad(d.getUTCMonth() + 1)}/${pad(d.getUTCDate())} ` +
+         `${pad(d.getUTCHours())}:${pad(d.getUTCMinutes())}:${secStr}`;
+}
+
+function computeYRange(arraysOfValues) {
+  let min = Infinity, max = -Infinity;
+  arraysOfValues.forEach(arr => {
+    for (let i = 0; i < arr.length; i++) {
+      const v = arr[i];
+      if (v < min) min = v;
+      if (v > max) max = v;
+    }
+  });
+  if (!isFinite(min)) return [0, 1];
+  const span = max - min || 1;
+  return [min - 0.05 * span, max + 0.05 * span];
+}
+
+function legendLabel(sig) {
+  const base = [sig.batch, sig.name].filter(Boolean).join(' / ');
+  return sig.units ? fmtHtml(base) + ' (' + fmtHtml(sig.units) + ')' : fmtHtml(base);
+}
+
+function bsClosest(arr, target) {
+  let lo = 0, hi = arr.length - 1;
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1;
+    if (arr[mid] < target) lo = mid + 1; else hi = mid;
+  }
+  if (lo > 0 && Math.abs(arr[lo - 1] - target) < Math.abs(arr[lo] - target)) return lo - 1;
+  return lo;
 }
 
 // ── Signal management ─────────────────────────────────────────────────────
@@ -63,7 +207,6 @@ async function addSignal(batch, idx, name, units) {
     return;
   }
 
-  // Prevent duplicates
   const key = `${batch}::${idx}`;
   if (signals.some(s => `${s.batch}::${s.idx}` === key)) {
     showToast('Signal already loaded', 'info');
@@ -71,22 +214,24 @@ async function addSignal(batch, idx, name, units) {
   }
 
   try {
-    showLoading('Loading signal\u2026');
-    const url = GlobalNav.signalUrl(batch, idx, APP_CONFIG.DEFAULT_DOWNSAMPLE);
+    showLoading('Loading signal\u2026', { sampleCount: ZOOM_DOWNSAMPLE });
+    const url = GlobalNav.signalUrl(batch, idx, ZOOM_DOWNSAMPLE);
     const data = await apiFetch(url);
     hideLoading();
 
-    const tUnits = detectTimeUnits(data.time);
     signals.push({
       batch, idx,
       name: data.name || name,
       units: data.units || units,
-      time: data.time,
-      values: data.values,
-      color: getSignalColor(signals.length),
-      timeUnits: tUnits
+      timeRaw:  data.time,
+      values:   data.values,
+      totalSamples: data.total_samples || data.samples,
+      tStart: data.t_start,
+      tEnd:   data.t_end,
+      color: getSignalColor(signals.length)
     });
 
+    _lastFetchedRange = null;
     renderAll();
   } catch (err) {
     hideLoading();
@@ -97,17 +242,32 @@ async function addSignal(batch, idx, name, units) {
 function removeSignal(index) {
   signals.splice(index, 1);
   signals.forEach((s, i) => { s.color = getSignalColor(i); });
+  _lastFetchedRange = null;
   renderAll();
 }
 
 function clearAll() {
   signals.length = 0;
+  _cancelZoom();
+  _lastFetchedRange = null;
   renderAll();
 }
 
 function setPlotMode(mode) {
   plotMode = mode;
-  renderAll();
+  const wasZoomed = _lastFetchedRange !== null;
+  _lastFetchedRange = null;
+  if (wasZoomed && signals.length > 0) {
+    // Signal data arrays still contain zoomed subset — must re-fetch overview
+    // before rendering in the new layout mode, otherwise the data is a tiny
+    // sliver against the full x-range and the signal looks blank.
+    _cancelZoom();
+    _isZoomFetching = false;
+    _doZoomFetch(null, null, null, null);   // fetches overview, then _reactPlot
+    updateSidebarActive();
+  } else {
+    renderAll();
+  }
 }
 
 // ── Rendering ─────────────────────────────────────────────────────────────
@@ -133,19 +293,35 @@ function renderCards() {
     const card = document.createElement('div');
     card.className = 'signal-card';
     card.style.borderLeftColor = sig.color;
+    const ratio = sig.totalSamples ? sig.values.length + '/' + sig.totalSamples.toLocaleString() : '';
     card.innerHTML = `
       <div class="card-close" onclick="removeSignal(${i})">\u2715</div>
-      <div class="card-batch">${escapeHtml(sig.batch)}</div>
-      <div class="card-name" style="color:${sig.color}">${escapeHtml(sig.name)}</div>
-      <div class="card-value" id="cv-${i}">\u2014</div>
+      <div class="card-batch">${fmtHtml(sig.batch)}</div>
+      <div class="card-name" style="color:${sig.color}">${fmtHtml(sig.name)}</div>
+      <div class="card-value" id="cv-${i}">--</div>
+      <div class="card-units">${fmtHtml(sig.units) || '--'}</div>
       <div class="card-hover-info" id="chi-${i}"></div>
-      <div class="card-meta">${escapeHtml(sig.units)}</div>
+      <div class="card-sample" id="cs-${i}">${ratio ? 'pts ' + ratio : ''}</div>
     `;
     container.appendChild(card);
   });
 }
 
 // ── Plotting ──────────────────────────────────────────────────────────────
+
+/**
+ * Shared x-axis config.  Uses type:'linear' so Plotly stores and returns
+ * raw epoch ms numbers — no date-string conversion, no timezone ambiguity.
+ * Custom tick labels are provided via tickvals/ticktext.
+ */
+function _xAxisConfig(extra) {
+  return {
+    ...PLOT_CONFIG.axis,
+    title: { text: 'Time (h:m:s)' },
+    type: 'linear',
+    ...extra
+  };
+}
 
 function renderPlot() {
   const el = document.getElementById('plotArea');
@@ -159,23 +335,28 @@ function renderPlot() {
         xref: 'paper', yref: 'paper', x: 0.5, y: 0.5,
         showarrow: false, font: { size: 14, color: '#8e90a6' }
       }]
-    }, { responsive: true });
+    }, { responsive: true, displaylogo: false, showLink: false });
+    _plotEl = null;
+    _updateZoomIndicator(null);
     return;
   }
 
   if (plotMode === 'overlay') plotOverlay(el);
   else plotSubplots(el);
 
+  // Attach event listeners (Plotly.newPlot purges old ones)
   el.on('plotly_hover', onHover);
   el.on('plotly_unhover', onUnhover);
+  el.on('plotly_relayout', onRelayout);
+  el.on('plotly_doubleclick', onDoubleClick);
 
-  // Track plot element for crosshair shape updates
   _plotEl = el;
+  _updateZoomIndicator(null);
 }
 
 function plotOverlay(el) {
   const traces = signals.map(sig => ({
-    x: sig.time, y: sig.values,
+    x: sig.timeRaw, y: sig.values,
     name: legendLabel(sig),
     type: 'scattergl', mode: 'lines',
     line: { color: sig.color, width: 1.5 },
@@ -184,16 +365,29 @@ function plotOverlay(el) {
 
   const yRange = computeYRange(signals.map(s => s.values));
 
-  const tLabel = signals[0].timeUnits ? signals[0].timeUnits.label : 'Time (s)';
+  // Compute explicit time range (NEVER rely on autorange — it fires
+  // spurious relayout events that create feedback loops)
+  const allT = signals.flatMap(s => s.timeRaw);
+  const tLo = Math.min(...allT), tHi = Math.max(...allT);
+  const pad = (tHi - tLo) * 0.01 || 1;
+  const xLo = tLo - pad, xHi = tHi + pad;
+  const ticks = _buildTimeTicks(xLo, xHi);
 
   const layout = {
-    xaxis: {
-      title: tLabel,
+    xaxis: _xAxisConfig({
+      range: [xLo, xHi], autorange: false,
       showspikes: true, spikemode: 'across', spikethickness: 1,
       spikecolor: '#999', spikesnap: 'cursor', spikedash: 'solid',
-      ...PLOT_CONFIG.axis
+      ...ticks
+    }),
+    yaxis: {
+      ...PLOT_CONFIG.axis,
+      title: { text: (signals.length === 1 && signals[0].units)
+        ? fmtHtml(signals[0].units)
+        : 'Value' },
+      range: yRange, autorange: false
     },
-    yaxis: { title: 'Value', range: yRange, ...PLOT_CONFIG.axis },
+    dragmode: 'zoom',
     plot_bgcolor: PLOT_CONFIG.bg, paper_bgcolor: PLOT_CONFIG.paperBg,
     font: PLOT_CONFIG.font,
     height: OVERLAY_HEIGHT,
@@ -203,10 +397,9 @@ function plotOverlay(el) {
     legend: { x: 0.01, y: 0.99, ...PLOT_CONFIG.legend }
   };
 
-  Plotly.newPlot(el, traces, layout, {
-    responsive: true, displayModeBar: true,
-    modeBarButtonsToRemove: ['lasso2d', 'select2d']
-  });
+  _lastPlotRange = { lo: xLo, hi: xHi };
+  _lastPlotTime = Date.now();
+  Plotly.newPlot(el, traces, layout, _PLOTLY_CFG);
 }
 
 function plotSubplots(el) {
@@ -221,8 +414,19 @@ function plotSubplots(el) {
     font: PLOT_CONFIG.font,
     height: totalHeight, margin: PLOT_CONFIG.margin,
     hovermode: 'x', hoverdistance: -1,
-    showlegend: true
+    showlegend: true,
+    dragmode: 'zoom'
   };
+
+  // Compute explicit synced time range for ALL subplot axes
+  // (NO matches:'x' — it causes event-routing bugs with scattergl;
+  //  instead we set identical explicit range on every axis)
+  const allT = signals.flatMap(s => s.timeRaw);
+  const tLo = Math.min(...allT), tHi = Math.max(...allT);
+  const pad = (tHi - tLo) * 0.01 || 1;
+  const xLo = tLo - pad, xHi = tHi + pad;
+  const ticks = _buildTimeTicks(xLo, xHi);
+  const xRange = { range: [xLo, xHi], autorange: false, ...ticks };
 
   signals.forEach((sig, i) => {
     const yRange = computeYRange([sig.values]);
@@ -231,32 +435,28 @@ function plotSubplots(el) {
 
     const xKey = i === 0 ? 'xaxis' : `xaxis${i + 1}`;
     const yKey = i === 0 ? 'yaxis' : `yaxis${i + 1}`;
-
-    // Per-subplot legend name (e.g. legend, legend2, legend3…)
     const legendKey = i === 0 ? 'legend' : `legend${i + 1}`;
 
-    const tLabel = sig.timeUnits ? sig.timeUnits.label : 'Time (s)';
-    layout[xKey] = {
-      title: tLabel,
+    // Every axis gets same explicit range — no matches, full control
+    layout[xKey] = _xAxisConfig({
       anchor: i === 0 ? 'y' : `y${i + 1}`,
-      ...(i > 0 ? { matches: 'x' } : {}),
-      ...PLOT_CONFIG.axis
-    };
+      ...xRange
+    });
+    const yLabel = sig.units ? fmtHtml(sig.units) : 'Value';
     layout[yKey] = {
-      title: sig.units || 'Value',
-      domain: [domBot, domTop], range: yRange,
-      anchor: i === 0 ? 'x' : `x${i + 1}`,
-      ...PLOT_CONFIG.axis
+      ...PLOT_CONFIG.axis,
+      title: { text: yLabel },
+      domain: [domBot, domTop], range: yRange, autorange: false,
+      anchor: i === 0 ? 'x' : `x${i + 1}`
     };
 
-    // Position each legend inside its own subplot domain
     layout[legendKey] = {
       x: 0.01, y: domTop, xanchor: 'left', yanchor: 'top',
       ...PLOT_CONFIG.legend
     };
 
     traces.push({
-      x: sig.time, y: sig.values,
+      x: sig.timeRaw, y: sig.values,
       name: legendLabel(sig),
       type: 'scattergl', mode: 'lines',
       line: { color: sig.color, width: 1.5 },
@@ -267,41 +467,505 @@ function plotSubplots(el) {
     });
   });
 
-  Plotly.newPlot(el, traces, layout, {
-    responsive: true, displayModeBar: true,
-    modeBarButtonsToRemove: ['lasso2d', 'select2d']
-  });
+  _lastPlotRange = { lo: xLo, hi: xHi };
+  _lastPlotTime = Date.now();
+  Plotly.newPlot(el, traces, layout, _PLOTLY_CFG);
+}
+
+// ============================================================================
+// ADAPTIVE ZOOM ENGINE
+// ============================================================================
+
+/**
+ * Read the CURRENT visible x-axis range from Plotly's internal state.
+ * Scans ALL x-axes (primary + secondary) because without matches:'x',
+ * each subplot axis is independent. Returns the first valid range found.
+ * With type:'linear', ax.range is always plain numbers (epoch ms).
+ * Returns { tMin, tMax } or null.
+ */
+function _getVisibleRange() {
+  if (!_plotEl || !_plotEl._fullLayout) return null;
+  const fl = _plotEl._fullLayout;
+  // Check primary first, then secondary axes
+  for (const key of Object.keys(fl)) {
+    if (!/^xaxis\d*$/.test(key)) continue;
+    const ax = fl[key];
+    if (!ax || !ax.range || ax.range.length < 2) continue;
+    const tMin = Number(ax.range[0]);
+    const tMax = Number(ax.range[1]);
+    if (isFinite(tMin) && isFinite(tMax) && tMin < tMax) return { tMin, tMax };
+  }
+  return null;
+}
+
+/**
+ * Force a full-overview reset: cancel any in-flight zoom, fetch overview,
+ * and re-render with the complete signal.
+ *
+ * Called from: double-click handler, custom modebar button, HTML reset button.
+ * Runs the fetch IMMEDIATELY (no debounce) so the user sees feedback fast.
+ */
+function _resetToOverview() {
+  if (_lastFetchedRange === null) {
+    // Already at overview — but still re-render to fix any visual issues
+    // (e.g. Plotly autoranged to wrong extent after double-click)
+    if (signals.length > 0) {
+      _reactPlot(null, null);
+      _updateZoomIndicator(null);
+    }
+    return;
+  }
+  _cancelZoom();
+  _isZoomFetching = false;
+  // Immediate fetch — reset is a deliberate user action, no debounce needed
+  _doZoomFetch(null, null, null, null);
+}
+
+/**
+ * Handle Plotly relayout events (zoom, pan, autoscale, reset).
+ *
+ * KEY DESIGN: No time-based suppression (that blocks legitimate user clicks).
+ * Instead, uses precise RANGE COMPARISON to detect and ignore "echo" events
+ * that Plotly fires after our own Plotly.newPlot() calls.
+ *
+ * Scans ALL xaxis keys so that zooming on any subplot is detected.
+ * Because the x-axis is type:'linear', all range values are plain numbers.
+ */
+function onRelayout(eventData) {
+  if (!eventData) return;
+
+  const keys = Object.keys(eventData);
+
+  // ── Detect autorange on ANY x-axis ────────────────────────────────────
+  // This catches: double-click, Autoscale button, Reset axes button.
+  // Always honoured, even if a zoom fetch is in progress.
+  const hasAutorange = keys.some(k =>
+    /^xaxis\d*\.autorange$/.test(k) && eventData[k] === true
+  );
+  if (hasAutorange) {
+    // Ignore autorange events that echo from our own newPlot (within 200ms)
+    if (Date.now() - _lastPlotTime < 200) return;
+    _resetToOverview();
+    return;
+  }
+
+  // All other relayout events are skipped while a fetch is in progress
+  if (_isZoomFetching) return;
+
+  // ── Detect range change on ANY x-axis (subplot support) ───────────────
+  let tMin, tMax;
+
+  // Form 1:  xaxis.range[0] / xaxis.range[1]  (or xaxis2.range[0], etc.)
+  for (const key of keys) {
+    const m = key.match(/^(xaxis\d*)\.range\[0\]$/);
+    if (m) {
+      const ax = m[1];
+      const r0 = Number(eventData[`${ax}.range[0]`]);
+      const r1 = Number(eventData[`${ax}.range[1]`]);
+      if (isFinite(r0) && isFinite(r1) && r0 < r1) {
+        tMin = r0;  tMax = r1;
+        break;
+      }
+    }
+  }
+
+  // Form 2:  xaxis.range = [lo, hi]  (array form)
+  if (tMin == null) {
+    for (const key of keys) {
+      const m = key.match(/^(xaxis\d*)\.range$/);
+      if (m && Array.isArray(eventData[key]) && eventData[key].length >= 2) {
+        const r0 = Number(eventData[key][0]);
+        const r1 = Number(eventData[key][1]);
+        if (isFinite(r0) && isFinite(r1) && r0 < r1) {
+          tMin = r0;  tMax = r1;
+          break;
+        }
+      }
+    }
+  }
+
+  if (tMin == null || tMax == null) return;
+
+  // ── Ignore echo events from our own Plotly.newPlot() ──────────────────
+  // After _reactPlot/plotOverlay/plotSubplots set an explicit range, Plotly
+  // fires back a relayout with that same range.  We detect this precisely by
+  // comparing against _lastPlotRange (tolerance 2ms to handle float rounding).
+  if (_lastPlotRange &&
+      Math.abs(_lastPlotRange.lo - tMin) < 2 &&
+      Math.abs(_lastPlotRange.hi - tMax) < 2) {
+    return;
+  }
+
+  // Skip if we already fetched this exact range
+  if (_lastFetchedRange &&
+      Math.abs(_lastFetchedRange.tMin - tMin) < 2 &&
+      Math.abs(_lastFetchedRange.tMax - tMax) < 2) {
+    return;
+  }
+
+  console.log('[Zoom] relayout detected:', { tMin, tMax, keys: keys.join(',') });
+  _scheduleZoomFetch(tMin, tMax);
+}
+
+/**
+ * Handle double-click on the plot → reset to full overview.
+ * Returns false to PREVENT Plotly's built-in autorange, which would just
+ * autorange to the current (zoomed) data extent — not the full signal.
+ * We handle the reset ourselves via _resetToOverview().
+ */
+function onDoubleClick() {
+  _resetToOverview();
+  return false;   // ← suppress Plotly default autorange
+}
+
+function _cancelZoom() {
+  if (_zoomTimer) { clearTimeout(_zoomTimer); _zoomTimer = null; }
+  if (_zoomAbort) { _zoomAbort.abort(); _zoomAbort = null; }
+}
+
+/**
+ * Schedule a zoom fetch after a debounce delay.
+ *
+ * Uses the relayout event values directly as the display range — do NOT
+ * re-read from Plotly internals, because in subplot mode the axis that was
+ * zoomed (e.g. xaxis2) is different from the primary (xaxis), and reading
+ * the primary would overwrite the zoom range with the overview range.
+ *
+ * A 5% margin is added on each side of the display range so the fetched
+ * data extends beyond the visible edges, eliminating low-res strips.
+ */
+function _scheduleZoomFetch(tMin, tMax) {
+  _cancelZoom();
+  _zoomTimer = setTimeout(() => {
+    // Display range = exactly what the relayout event reported
+    const displayMin = tMin, displayMax = tMax;
+    // Fetch range = display range + 5% margin on each side
+    const margin = (displayMax - displayMin) * 0.05;
+    const fetchMin = displayMin - margin;
+    const fetchMax = displayMax + margin;
+    _doZoomFetch(fetchMin, fetchMax, displayMin, displayMax);
+  }, ZOOM_DEBOUNCE_MS);
+}
+
+/**
+ * Fetch fresh data for each signal within [fetchMin, fetchMax].
+ * Display range [displayMin, displayMax] is used for the axis range
+ * (typically the visible area without margins).
+ * If fetchMin/fetchMax are null, fetches the full overview.
+ */
+async function _doZoomFetch(fetchMin, fetchMax, displayMin, displayMax) {
+  if (signals.length === 0) return;
+
+  // Abort any previous in-flight zoom fetches
+  if (_zoomAbort) _zoomAbort.abort();
+  _zoomAbort = new AbortController();
+  const { signal: abortSignal } = _zoomAbort;
+
+  _isZoomFetching = true;
+  _updateZoomIndicator('loading');
+
+  // Use display range for the duplicate-fetch guard and _reactPlot
+  const dMin = displayMin != null ? displayMin : null;
+  const dMax = displayMax != null ? displayMax : null;
+
+  try {
+    // Fire all signal fetches in parallel
+    const fetches = signals.map(sig => {
+      let url = GlobalNav.signalUrl(sig.batch, sig.idx, ZOOM_DOWNSAMPLE);
+      if (fetchMin != null && fetchMax != null) {
+        url += `&t_min=${fetchMin}&t_max=${fetchMax}`;
+      }
+      return apiFetch(url, { signal: abortSignal });
+    });
+
+    const results = await Promise.all(fetches);
+
+    // Check abort wasn't called while we waited
+    if (abortSignal.aborted) return;
+
+    // Update each signal's display data (guard against empty responses)
+    let anyData = false;
+    results.forEach((data, i) => {
+      if (data.time && data.time.length > 0 && data.values && data.values.length > 0) {
+        signals[i].timeRaw = data.time;
+        signals[i].values  = data.values;
+        anyData = true;
+      }
+    });
+
+    if (!anyData) {
+      console.warn('Zoom fetch returned no data for any signal');
+      _updateZoomIndicator('error');
+      _isZoomFetching = false;
+      return;
+    }
+
+    // Track what range we just fetched (for duplicate-fetch guard)
+    // Use display range so matching works against relayout events
+    _lastFetchedRange = (dMin != null && dMax != null) ? { tMin: dMin, tMax: dMax } : null;
+
+    // Re-render with DISPLAY range (not the wider fetch range)
+    _reactPlot(dMin, dMax);
+    renderCards();
+    saveState();
+
+    // Compute zoom level for indicator
+    if (dMin != null && dMax != null) {
+      const fullSpan = Math.max(...signals.map(s => s.tEnd - s.tStart));
+      const viewSpan = dMax - dMin;
+      const zoomPct = fullSpan > 0 ? ((viewSpan / fullSpan) * 100) : 100;
+      _updateZoomIndicator(zoomPct);
+    } else {
+      _updateZoomIndicator(null);
+    }
+
+  } catch (err) {
+    if (err.name === 'AbortError') return; // expected on rapid zoom
+    console.warn('Zoom fetch failed:', err);
+    _updateZoomIndicator('error');
+  } finally {
+    _isZoomFetching = false;
+  }
+}
+
+/**
+ * Re-render the plot with fresh data after a zoom fetch.
+ *
+ * Uses Plotly.newPlot() instead of Plotly.react() to guarantee a complete
+ * WebGL buffer refresh — scattergl traces can show stale data on partial
+ * buffer updates when the data array length changes significantly.
+ *
+ * Event listeners are re-attached after each newPlot (Plotly purges them).
+ */
+function _reactPlot(tMin, tMax) {
+  const el = _plotEl || document.getElementById('plotArea');
+  if (!el) return;
+
+  // Always compute EXPLICIT x range — NEVER use autorange: true.
+  // autorange: true triggers async relayout events from Plotly that create
+  // feedback loops (Plotly computes range → fires relayout → we detect zoom).
+  let xLo, xHi;
+  if (tMin != null && tMax != null) {
+    xLo = tMin;
+    xHi = tMax;
+  } else {
+    // Overview: use full signal time extent with 1% padding
+    xLo = Math.min(...signals.map(s => s.tStart));
+    xHi = Math.max(...signals.map(s => s.tEnd));
+    const pad = (xHi - xLo) * 0.01 || 1;
+    xLo -= pad;
+    xHi += pad;
+  }
+  const ticks = _buildTimeTicks(xLo, xHi);
+  const xRangeProps = { range: [xLo, xHi], autorange: false, ...ticks };
+
+  let traces, layout;
+
+  if (plotMode === 'overlay') {
+    traces = signals.map((sig, i) => ({
+      x: sig.timeRaw, y: sig.values,
+      name: legendLabel(sig),
+      type: 'scattergl', mode: 'lines',
+      line: { color: sig.color, width: 1.5 },
+      hoverinfo: 'none'
+    }));
+
+    const yRange = computeYRange(signals.map(s => s.values));
+    layout = {
+      xaxis: _xAxisConfig({
+        showspikes: true, spikemode: 'across', spikethickness: 1,
+        spikecolor: '#999', spikesnap: 'cursor', spikedash: 'solid',
+        ...xRangeProps
+      }),
+      yaxis: {
+        ...PLOT_CONFIG.axis,
+        title: { text: (signals.length === 1 && signals[0].units)
+          ? fmtHtml(signals[0].name) + ' (' + fmtHtml(signals[0].units) + ')'
+          : 'Value' },
+        range: yRange, autorange: false
+      },
+      dragmode: 'zoom',
+      plot_bgcolor: PLOT_CONFIG.bg, paper_bgcolor: PLOT_CONFIG.paperBg,
+      font: PLOT_CONFIG.font,
+      height: OVERLAY_HEIGHT,
+      margin: PLOT_CONFIG.margin,
+      hovermode: 'x', hoverdistance: -1,
+      showlegend: true,
+      legend: { x: 0.01, y: 0.99, ...PLOT_CONFIG.legend }
+    };
+
+  } else {
+    // Subplots mode — NO matches:'x', explicit identical range on ALL axes
+    const n = signals.length;
+    const totalHeight = 100 + n * SUBPLOT_HEIGHT_PER;
+    const gap = 0.08;
+    const hPerSub = (1 - (n - 1) * gap) / n;
+
+    traces = [];
+    layout = {
+      plot_bgcolor: PLOT_CONFIG.bg, paper_bgcolor: PLOT_CONFIG.paperBg,
+      font: PLOT_CONFIG.font,
+      height: totalHeight, margin: PLOT_CONFIG.margin,
+      hovermode: 'x', hoverdistance: -1,
+      showlegend: true,
+      dragmode: 'zoom'
+    };
+
+    signals.forEach((sig, i) => {
+      const yRange = computeYRange([sig.values]);
+      const domBot = 1 - (i + 1) * hPerSub - i * gap;
+      const domTop = domBot + hPerSub;
+
+      const xKey = i === 0 ? 'xaxis' : `xaxis${i + 1}`;
+      const yKey = i === 0 ? 'yaxis' : `yaxis${i + 1}`;
+      const legendKey = i === 0 ? 'legend' : `legend${i + 1}`;
+
+      // Every axis gets explicit identical range — no matches, full control
+      layout[xKey] = _xAxisConfig({
+        anchor: i === 0 ? 'y' : `y${i + 1}`,
+        ...xRangeProps
+      });
+      const yLabel = sig.units ? fmtHtml(sig.units) : 'Value';
+      layout[yKey] = {
+        ...PLOT_CONFIG.axis,
+        title: { text: yLabel },
+        domain: [domBot, domTop], range: yRange, autorange: false,
+        anchor: i === 0 ? 'x' : `x${i + 1}`
+      };
+      layout[legendKey] = {
+        x: 0.01, y: domTop, xanchor: 'left', yanchor: 'top',
+        ...PLOT_CONFIG.legend
+      };
+
+      traces.push({
+        x: sig.timeRaw, y: sig.values,
+        name: legendLabel(sig),
+        type: 'scattergl', mode: 'lines',
+        line: { color: sig.color, width: 1.5 },
+        hoverinfo: 'none',
+        xaxis: i === 0 ? 'x' : `x${i + 1}`,
+        yaxis: i === 0 ? 'y' : `y${i + 1}`,
+        legend: legendKey
+      });
+    });
+  }
+
+  // Record what range we're setting — onRelayout uses this to ignore
+  // the "echo" event that Plotly fires after newPlot.
+  _lastPlotRange = { lo: xLo, hi: xHi };
+  _lastPlotTime = Date.now();
+
+  // Full newPlot guarantees complete WebGL buffer refresh.
+  Plotly.newPlot(el, traces, layout, _PLOTLY_CFG);
+
+  // Re-attach event listeners (Plotly.newPlot purges them)
+  el.on('plotly_hover', onHover);
+  el.on('plotly_unhover', onUnhover);
+  el.on('plotly_relayout', onRelayout);
+  el.on('plotly_doubleclick', onDoubleClick);
+  _plotEl = el;
+}
+
+function _updateZoomIndicator(state) {
+  const el = document.getElementById('zoomIndicator');
+  const resetBtn = document.getElementById('resetZoomBtn');
+  if (!el) return;
+
+  if (state === null || state === undefined) {
+    el.style.display = 'none';
+    if (resetBtn) resetBtn.style.display = 'none';
+    return;
+  }
+  el.style.display = 'inline-block';
+
+  if (state === 'loading') {
+    el.textContent = 'Refining\u2026';
+    el.className = 'zoom-indicator loading';
+    if (resetBtn) resetBtn.style.display = 'inline-block';
+  } else if (state === 'error') {
+    el.textContent = 'Zoom fetch failed';
+    el.className = 'zoom-indicator error';
+    if (resetBtn) resetBtn.style.display = 'inline-block';
+  } else {
+    const pct = Number(state);
+    if (pct >= 99) {
+      el.style.display = 'none';
+      if (resetBtn) resetBtn.style.display = 'none';
+    } else {
+      el.textContent = `Viewing ${pct.toFixed(1)}% of signal`;
+      el.className = 'zoom-indicator';
+      if (resetBtn) resetBtn.style.display = 'inline-block';
+    }
+  }
 }
 
 // ── Hover ─────────────────────────────────────────────────────────────────
 
 function onHover(ev) {
   if (!ev.points || ev.points.length === 0) return;
-  const hoverX = ev.points[0].x;
 
-  // Update card values with time (with units), sample index, and value
+  const ptMap = {};
+  ev.points.forEach(pt => { ptMap[pt.curveNumber] = pt.pointIndex; });
+
+  const refCurve = ev.points[0].curveNumber;
+  const refIdx   = ev.points[0].pointIndex;
+  const refSig   = signals[refCurve];
+  const refMs    = (refSig && refSig.timeRaw && refIdx < refSig.timeRaw.length)
+                   ? refSig.timeRaw[refIdx] : null;
+
   signals.forEach((sig, i) => {
-    const valEl = document.getElementById(`cv-${i}`);
+    const valEl  = document.getElementById(`cv-${i}`);
     const infoEl = document.getElementById(`chi-${i}`);
+    const sampEl = document.getElementById(`cs-${i}`);
     if (!valEl) return;
-    const j = bsClosest(sig.time, hoverX);
-    if (j >= 0 && j < sig.values.length) {
-      valEl.textContent = formatNumber(sig.values[j]);
-      if (infoEl) {
-        const tUnit = sig.timeUnits ? sig.timeUnits.short : 's';
-        infoEl.textContent = `t = ${formatNumber(sig.time[j])} ${tUnit}  \u2502  sample ${j}`;
+
+    const tArr = sig.timeRaw;
+    let j;
+
+    if (ptMap[i] != null) {
+      j = ptMap[i];
+    } else if (refMs !== null && tArr && tArr.length > 0) {
+      j = bsClosest(tArr, refMs);
+    } else {
+      j = -1;
+    }
+
+    const val = (j >= 0 && j < sig.values.length) ? sig.values[j] : undefined;
+
+    let closeEnough = true;
+    if (refMs !== null && tArr && tArr.length > 1 && j >= 0 && j < tArr.length) {
+      const sigMs = tArr[j];
+      const avgInterval = (tArr[tArr.length - 1] - tArr[0]) / (tArr.length - 1);
+      closeEnough = Math.abs(sigMs - refMs) <= avgInterval * 2;
+    }
+
+    if (closeEnough && val !== undefined && val !== null && !Number.isNaN(val)) {
+      valEl.textContent = formatNumber(val);
+      if (infoEl && tArr && j < tArr.length) {
+        infoEl.textContent = `t = ${formatEpochMs(tArr[j])}`;
+      }
+      if (sampEl) {
+        // Show sample index in the FULL signal (not the downsampled view).
+        // Compute from timestamp: proportional position within [tStart, tEnd].
+        const tSpan = sig.tEnd - sig.tStart;
+        const fullIdx = (tSpan > 0 && j < tArr.length)
+          ? Math.round((tArr[j] - sig.tStart) / tSpan * (sig.totalSamples - 1))
+          : j;
+        sampEl.textContent = `sample = ${fullIdx.toLocaleString()}`;
       }
     } else {
-      valEl.textContent = '\u2014';
+      valEl.textContent = '--';
       if (infoEl) infoEl.textContent = '';
+      if (sampEl) sampEl.textContent = '';
     }
   });
 
-  // Draw synced vertical crosshair lines across all subplots
+  // Synced vertical crosshair in subplot mode
   if (_plotEl && plotMode === 'subplots' && signals.length > 0) {
+    const hoverXRaw = ev.points[0].x;
     const shapes = signals.map((_, i) => ({
       type: 'line',
-      x0: hoverX, x1: hoverX, y0: 0, y1: 1,
+      x0: hoverXRaw, x1: hoverXRaw, y0: 0, y1: 1,
       xref: i === 0 ? 'x' : `x${i + 1}`,
       yref: i === 0 ? 'y domain' : `y${i + 1} domain`,
       line: { color: '#999', width: 1 }
@@ -312,47 +976,17 @@ function onHover(ev) {
 
 function onUnhover() {
   signals.forEach((_, i) => {
-    const valEl = document.getElementById(`cv-${i}`);
+    const valEl  = document.getElementById(`cv-${i}`);
     const infoEl = document.getElementById(`chi-${i}`);
-    if (valEl) valEl.textContent = '\u2014';
+    const sampEl = document.getElementById(`cs-${i}`);
+    if (valEl)  valEl.textContent = '--';
     if (infoEl) infoEl.textContent = '';
+    if (sampEl) sampEl.textContent = '';
   });
 
-  // Remove crosshair shapes
   if (_plotEl && plotMode === 'subplots') {
     Plotly.relayout(_plotEl, { shapes: [] });
   }
-}
-
-function bsClosest(arr, target) {
-  let lo = 0, hi = arr.length - 1;
-  while (lo < hi) {
-    const mid = (lo + hi) >> 1;
-    if (arr[mid] < target) lo = mid + 1; else hi = mid;
-  }
-  if (lo > 0 && Math.abs(arr[lo - 1] - target) < Math.abs(arr[lo] - target)) return lo - 1;
-  return lo;
-}
-
-// ── Helpers ───────────────────────────────────────────────────────────────
-
-function computeYRange(arraysOfValues) {
-  let min = Infinity, max = -Infinity;
-  arraysOfValues.forEach(arr => {
-    for (let i = 0; i < arr.length; i++) {
-      const v = arr[i];
-      if (v < min) min = v;
-      if (v > max) max = v;
-    }
-  });
-  if (!isFinite(min)) return [0, 1];
-  const span = max - min || 1;
-  return [min - 0.05 * span, max + 0.05 * span];
-}
-
-function legendLabel(sig) {
-  const base = [sig.batch, sig.name].filter(Boolean).join(' / ');
-  return sig.units ? `${base} (${sig.units})` : base;
 }
 
 // ── State persistence ─────────────────────────────────────────────────────
@@ -362,16 +996,29 @@ function saveState() {
     sessionStorage.setItem('viewerState', JSON.stringify({
       signals: signals.map(s => ({
         batch: s.batch, idx: s.idx, name: s.name, units: s.units,
-        time: s.time, values: s.values
+        timeRaw: s.timeRaw, values: s.values,
+        totalSamples: s.totalSamples, tStart: s.tStart, tEnd: s.tEnd
       })),
       plotMode
     }));
   } catch (e) {
-    console.warn('viewerState save failed (storage full?):', e);
+    // If storage is full, save without the bulky arrays
+    try {
+      sessionStorage.setItem('viewerState', JSON.stringify({
+        signals: signals.map(s => ({
+          batch: s.batch, idx: s.idx, name: s.name, units: s.units,
+          totalSamples: s.totalSamples, tStart: s.tStart, tEnd: s.tEnd
+        })),
+        plotMode,
+        _needsReload: true
+      }));
+    } catch (_) {
+      console.warn('viewerState save failed (storage full)');
+    }
   }
 }
 
-function restoreState() {
+async function restoreState() {
   const raw = sessionStorage.getItem('viewerState');
   if (!raw) return;
   try {
@@ -382,17 +1029,27 @@ function restoreState() {
       if (sel) sel.value = plotMode;
     }
     if (state.signals && state.signals.length > 0) {
-      state.signals.forEach((s, i) => {
-        if (s.time && s.values) {
-          signals.push({
-            batch: s.batch, idx: s.idx, name: s.name, units: s.units,
-            time: s.time, values: s.values,
-            color: getSignalColor(i),
-            timeUnits: detectTimeUnits(s.time)
-          });
+      if (state._needsReload) {
+        for (const s of state.signals) {
+          await addSignal(s.batch, s.idx, s.name, s.units);
         }
-      });
-      if (signals.length > 0) renderAll();
+      } else {
+        state.signals.forEach((s, i) => {
+          const raw = s.timeRaw || s.time;
+          if (raw && s.values) {
+            signals.push({
+              batch: s.batch, idx: s.idx, name: s.name, units: s.units,
+              timeRaw: raw,
+              values: s.values,
+              totalSamples: s.totalSamples || s.values.length,
+              tStart: s.tStart || raw[0],
+              tEnd: s.tEnd || raw[raw.length - 1],
+              color: getSignalColor(i)
+            });
+          }
+        });
+        if (signals.length > 0) renderAll();
+      }
     }
   } catch (e) {
     console.warn('viewerState restore failed:', e);
@@ -408,7 +1065,14 @@ document.addEventListener('DOMContentLoaded', async () => {
     addSignal(batch, idx, name, units);
   };
 
-  restoreState();
+  GlobalNav.onSelectionChange = function () {
+    signals.length = 0;
+    _cancelZoom();
+    _lastFetchedRange = null;
+    renderAll();
+  };
+
+  await restoreState();
   if (signals.length === 0) renderPlot();
 });
 </script>

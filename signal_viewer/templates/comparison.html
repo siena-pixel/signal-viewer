@@ -39,32 +39,68 @@
 // COMPARISON MODULE
 // ============================================================================
 
+// Margins tuned so y-axis labels (left + right) and x-axis labels are visible
+const CMP_MARGIN      = { l: 80, r: 24, t: 24, b: 56, autoexpand: true };
+const CMP_MARGIN_DUAL = { l: 80, r: 80, t: 24, b: 56, autoexpand: true };
+
 const cmp = {
   sigA: null, sigB: null,   // { batch, idx, name, units }
-  dataA: null, dataB: null  // { time, values, name, units }
+  dataA: null, dataB: null  // { time, values, name, units, timePlot }
 };
+
+let _cmpBusy = false;         // guard against overlapping signal loads
+let _corrAbort = null;        // AbortController for in-flight correlation request
+
+/**
+ * Convert epoch-ms time array to ISO datetime strings for Plotly date axes.
+ */
+function cmpEpochMsToDateStrings(timeArr) {
+  if (!timeArr || timeArr.length === 0) return [];
+  return timeArr.map(function (ms) { return new Date(ms).toISOString(); });
+}
 
 // ── Signal selection ──────────────────────────────────────────────────────
 
 async function onCmpSignalClick(batch, idx, name, units) {
+  // Prevent overlapping requests that cause frozen / inconsistent state
+  if (_cmpBusy) return;
+  _cmpBusy = true;
+
   const meta = { batch, idx, name, units };
 
-  if (!cmp.sigA) {
-    cmp.sigA = meta;
-    cmp.dataA = await fetchSignal(batch, idx);
-  } else if (!cmp.sigB) {
-    cmp.sigB = meta;
-    cmp.dataB = await fetchSignal(batch, idx);
-  } else {
-    // Replace B
-    cmp.sigB = meta;
-    cmp.dataB = await fetchSignal(batch, idx);
-  }
+  try {
+    showLoading('Loading signal\u2026', { sampleCount: APP_CONFIG.DEFAULT_DOWNSAMPLE });
 
-  renderChips();
-  renderAllPlots();
-  updateCmpSidebarActive();
-  saveCmpState();
+    const data = await fetchSignal(batch, idx);
+
+    if (!data) {
+      // Fetch failed (timeout / network) — don't update state
+      return;
+    }
+
+    // Attach date strings for Plotly
+    data.timePlot = cmpEpochMsToDateStrings(data.time);
+
+    if (!cmp.sigA) {
+      cmp.sigA = meta;
+      cmp.dataA = data;
+    } else if (!cmp.sigB) {
+      cmp.sigB = meta;
+      cmp.dataB = data;
+    } else {
+      // Replace B
+      cmp.sigB = meta;
+      cmp.dataB = data;
+    }
+
+    renderChips();
+    renderAllPlots();
+    updateCmpSidebarActive();
+    saveCmpState();
+  } finally {
+    hideLoading();
+    _cmpBusy = false;
+  }
 }
 
 function updateCmpSidebarActive() {
@@ -79,18 +115,32 @@ async function fetchSignal(batch, idx) {
     const url = GlobalNav.signalUrl(batch, idx, APP_CONFIG.DEFAULT_DOWNSAMPLE);
     return await apiFetch(url);
   } catch (err) {
-    showToast(`Failed to load signal: ${err.message}`, 'error');
+    showToast('Failed to load signal: ' + err.message, 'error');
     return null;
   }
 }
 
 function resetComparison() {
+  // Cancel any in-flight work
+  _cmpBusy = false;
+  hideLoading();
+
+  // Abort any pending correlation request so the server response is ignored
+  if (_corrAbort) { _corrAbort.abort(); _corrAbort = null; }
+
   cmp.sigA = null; cmp.sigB = null;
   cmp.dataA = null; cmp.dataB = null;
+
   renderChips();
+
+  // Purge Plotly instances to free WebGL contexts and memory
+  ['overlayPlot', 'xyPlot', 'histPlot', 'corrPlot'].forEach(function (id) {
+    var el = document.getElementById(id);
+    if (el) { Plotly.purge(el); }
+  });
   clearAllPlots();
+
   GlobalNav.updateSidebarHighlights([]);
-  sessionStorage.removeItem('cmpState');
 }
 
 // ── Chips ─────────────────────────────────────────────────────────────────
@@ -107,10 +157,9 @@ function makeChip(label, name, color) {
   const chip = document.createElement('div');
   chip.className = 'signal-chip';
   chip.style.borderLeftColor = color;
-  chip.innerHTML = `
-    <span class="chip-dot" style="background:${color}"></span>
-    <span class="chip-label">${label}: ${escapeHtml(name)}</span>
-  `;
+  chip.innerHTML =
+    '<span class="chip-dot" style="background:' + color + '"></span>' +
+    '<span class="chip-label">' + label + ': ' + fmtHtml(name) + '</span>';
   return chip;
 }
 
@@ -124,92 +173,130 @@ function renderAllPlots() {
 }
 
 function clearAllPlots() {
-  ['overlayPlot', 'xyPlot', 'histPlot', 'corrPlot'].forEach(id => {
-    Plotly.newPlot(id, [], {}, { responsive: true });
+  ['overlayPlot', 'xyPlot', 'histPlot', 'corrPlot'].forEach(function (id) {
+    Plotly.newPlot(id, [], {
+      xaxis: { visible: false }, yaxis: { visible: false },
+      plot_bgcolor: PLOT_CONFIG.bg, paper_bgcolor: PLOT_CONFIG.paperBg,
+      margin: CMP_MARGIN
+    }, { responsive: true, displaylogo: false, showLink: false });
   });
 }
 
 function plotOverlay() {
   if (!cmp.dataA && !cmp.dataB) {
-    Plotly.newPlot('overlayPlot', [], {}, { responsive: true });
+    Plotly.newPlot('overlayPlot', [], {
+      xaxis: { visible: false }, yaxis: { visible: false },
+      plot_bgcolor: PLOT_CONFIG.bg, paper_bgcolor: PLOT_CONFIG.paperBg,
+      margin: CMP_MARGIN
+    }, { responsive: true, displaylogo: false, showLink: false });
     return;
   }
 
   const traces = [];
+  const hasBoth = !!(cmp.dataA && cmp.dataB);
 
   if (cmp.dataA) {
     traces.push({
-      x: cmp.dataA.time, y: cmp.dataA.values,
+      x: cmp.dataA.timePlot || cmp.dataA.time,
+      y: cmp.dataA.values,
       name: cmp.sigA.name,
       type: 'scattergl', mode: 'lines',
       line: { color: PLOT_CONFIG.CMP_COLORS[0], width: 1.5 },
-      hovertemplate: '<b>Signal A</b><br>%{x:.4f}<br>%{y:.6f}<extra></extra>'
+      hoverinfo: 'none'
     });
   }
 
   if (cmp.dataB) {
     const traceB = {
-      x: cmp.dataB.time, y: cmp.dataB.values,
+      x: cmp.dataB.timePlot || cmp.dataB.time,
+      y: cmp.dataB.values,
       name: cmp.sigB.name,
       type: 'scattergl', mode: 'lines',
       line: { color: PLOT_CONFIG.CMP_COLORS[1], width: 1.5 },
-      hovertemplate: '<b>Signal B</b><br>%{x:.4f}<br>%{y:.6f}<extra></extra>'
+      hoverinfo: 'none'
     };
-    // Use secondary y-axis when both loaded
-    if (cmp.dataA) traceB.yaxis = 'y2';
+    if (hasBoth) traceB.yaxis = 'y2';
     traces.push(traceB);
   }
 
+  const yLabelA = (cmp.sigA && cmp.sigA.units)
+    ? fmtHtml(cmp.sigA.name) + ' (' + fmtHtml(cmp.sigA.units) + ')'
+    : (cmp.sigA ? fmtHtml(cmp.sigA.name) : '');
+
   const layout = {
-    xaxis: { title: 'Index', ...PLOT_CONFIG.axis },
-    yaxis: { title: cmp.sigA ? cmp.sigA.name : '', ...PLOT_CONFIG.axis },
+    xaxis: {
+      ...PLOT_CONFIG.axis,
+      title: { text: 'Time (h:m:s)' },
+      type: 'date',
+      tickformat: '%H:%M:%S'
+    },
+    yaxis: { ...PLOT_CONFIG.axis, title: { text: yLabelA } },
     hovermode: 'x unified',
-    margin: PLOT_CONFIG.marginSm,
+    margin: hasBoth ? CMP_MARGIN_DUAL : CMP_MARGIN,
     plot_bgcolor: PLOT_CONFIG.bg, paper_bgcolor: PLOT_CONFIG.paperBg,
     font: PLOT_CONFIG.font,
     showlegend: true,
     legend: { x: 0.02, y: 0.98, ...PLOT_CONFIG.legend }
   };
 
-  if (cmp.dataA && cmp.dataB) {
+  if (hasBoth) {
+    const yLabelB = (cmp.sigB && cmp.sigB.units)
+      ? fmtHtml(cmp.sigB.name) + ' (' + fmtHtml(cmp.sigB.units) + ')'
+      : (cmp.sigB ? fmtHtml(cmp.sigB.name) : '');
     layout.yaxis2 = {
-      title: cmp.sigB.name,
-      overlaying: 'y', side: 'right', ...PLOT_CONFIG.axis
+      ...PLOT_CONFIG.axis,
+      title: { text: yLabelB },
+      overlaying: 'y', side: 'right'
     };
   }
 
-  Plotly.newPlot('overlayPlot', traces, layout, { responsive: true });
+  Plotly.newPlot('overlayPlot', traces, layout, { responsive: true, displaylogo: false, showLink: false });
 }
 
 function plotXY() {
   if (!cmp.dataA || !cmp.dataB) {
-    Plotly.newPlot('xyPlot', [], {}, { responsive: true });
+    Plotly.newPlot('xyPlot', [], {
+      xaxis: { visible: false }, yaxis: { visible: false },
+      plot_bgcolor: PLOT_CONFIG.bg, paper_bgcolor: PLOT_CONFIG.paperBg,
+      margin: CMP_MARGIN
+    }, { responsive: true, displaylogo: false, showLink: false });
     return;
   }
 
   const minLen = Math.min(cmp.dataA.values.length, cmp.dataB.values.length);
+
+  const xLabel = (cmp.sigA && cmp.sigA.units)
+    ? fmtHtml(cmp.sigA.name) + ' (' + fmtHtml(cmp.sigA.units) + ')'
+    : fmtHtml(cmp.sigA.name);
+  const yLabel = (cmp.sigB && cmp.sigB.units)
+    ? fmtHtml(cmp.sigB.name) + ' (' + fmtHtml(cmp.sigB.units) + ')'
+    : fmtHtml(cmp.sigB.name);
 
   const trace = {
     x: cmp.dataA.values.slice(0, minLen),
     y: cmp.dataB.values.slice(0, minLen),
     type: 'scattergl', mode: 'markers',
     marker: { size: 2, color: PLOT_CONFIG.CMP_COLORS[2], opacity: 0.5 },
-    hovertemplate: `X: %{x:.4f}<br>Y: %{y:.4f}<extra></extra>`
+    hovertemplate: 'X: %{x:.4f}<br>Y: %{y:.4f}<extra></extra>'
   };
 
   Plotly.newPlot('xyPlot', [trace], {
-    xaxis: { title: cmp.sigA.name, ...PLOT_CONFIG.axis },
-    yaxis: { title: cmp.sigB.name, ...PLOT_CONFIG.axis },
+    xaxis: { ...PLOT_CONFIG.axis, title: { text: xLabel } },
+    yaxis: { ...PLOT_CONFIG.axis, title: { text: yLabel } },
     hovermode: 'closest',
-    margin: PLOT_CONFIG.marginSm,
+    margin: CMP_MARGIN,
     plot_bgcolor: PLOT_CONFIG.bg, paper_bgcolor: PLOT_CONFIG.paperBg,
     font: PLOT_CONFIG.font
-  }, { responsive: true });
+  }, { responsive: true, displaylogo: false, showLink: false });
 }
 
 function plotHistogram() {
   if (!cmp.dataA && !cmp.dataB) {
-    Plotly.newPlot('histPlot', [], {}, { responsive: true });
+    Plotly.newPlot('histPlot', [], {
+      xaxis: { visible: false }, yaxis: { visible: false },
+      plot_bgcolor: PLOT_CONFIG.bg, paper_bgcolor: PLOT_CONFIG.paperBg,
+      margin: CMP_MARGIN
+    }, { responsive: true, displaylogo: false, showLink: false });
     return;
   }
 
@@ -228,33 +315,52 @@ function plotHistogram() {
   }
 
   Plotly.newPlot('histPlot', traces, {
-    xaxis: { title: 'Value', ...PLOT_CONFIG.axis },
-    yaxis: { title: 'Frequency', ...PLOT_CONFIG.axis },
+    xaxis: { ...PLOT_CONFIG.axis, title: { text: 'Value' } },
+    yaxis: { ...PLOT_CONFIG.axis, title: { text: 'Frequency' } },
     barmode: 'overlay',
     hovermode: 'x unified',
-    margin: PLOT_CONFIG.marginSm,
+    margin: CMP_MARGIN,
     plot_bgcolor: PLOT_CONFIG.bg, paper_bgcolor: PLOT_CONFIG.paperBg,
     font: PLOT_CONFIG.font,
     showlegend: true,
     legend: { x: 0.02, y: 0.98, ...PLOT_CONFIG.legend }
-  }, { responsive: true });
+  }, { responsive: true, displaylogo: false, showLink: false });
 }
 
 async function plotCorrelation() {
   if (!cmp.dataA || !cmp.dataB || !GlobalNav.filePath) {
-    Plotly.newPlot('corrPlot', [], {}, { responsive: true });
+    Plotly.newPlot('corrPlot', [], {
+      xaxis: { visible: false }, yaxis: { visible: false },
+      plot_bgcolor: PLOT_CONFIG.bg, paper_bgcolor: PLOT_CONFIG.paperBg,
+      margin: CMP_MARGIN
+    }, { responsive: true, displaylogo: false, showLink: false });
     return;
   }
 
+  // Cancel any previous in-flight correlation request
+  if (_corrAbort) { _corrAbort.abort(); }
+  _corrAbort = new AbortController();
+
   try {
-    const result = await apiPost('/api/analysis/correlation', {
-      file_path_a: GlobalNav.filePath,
-      batch_a: cmp.sigA.batch,
-      signal_idx_a: cmp.sigA.idx,
-      file_path_b: GlobalNav.filePath,
-      batch_b: cmp.sigB.batch,
-      signal_idx_b: cmp.sigB.idx
+    // Use fetch directly so we can attach our own AbortController
+    const resp = await fetch('/api/analysis/correlation', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        file_path_a: GlobalNav.filePath,
+        batch_a: cmp.sigA.batch,
+        signal_idx_a: cmp.sigA.idx,
+        file_path_b: GlobalNav.filePath,
+        batch_b: cmp.sigB.batch,
+        signal_idx_b: cmp.sigB.idx
+      }),
+      signal: _corrAbort.signal
     });
+    if (!resp.ok) throw new Error('HTTP ' + resp.status);
+    const result = await resp.json();
+
+    // If the comparison was cleared while we were awaiting, bail out
+    if (!cmp.dataA || !cmp.dataB) return;
 
     const trace = {
       x: result.lags, y: result.correlation,
@@ -265,22 +371,28 @@ async function plotCorrelation() {
     };
 
     Plotly.newPlot('corrPlot', [trace], {
-      xaxis: { title: 'Lag', ...PLOT_CONFIG.axis },
-      yaxis: { title: 'Correlation', ...PLOT_CONFIG.axis },
+      xaxis: { ...PLOT_CONFIG.axis, title: { text: 'Lag (samples)' } },
+      yaxis: { ...PLOT_CONFIG.axis, title: { text: 'Correlation' } },
       hovermode: 'x unified',
-      margin: PLOT_CONFIG.marginSm,
+      margin: CMP_MARGIN,
       plot_bgcolor: PLOT_CONFIG.bg, paper_bgcolor: PLOT_CONFIG.paperBg,
       font: PLOT_CONFIG.font
-    }, { responsive: true });
+    }, { responsive: true, displaylogo: false, showLink: false });
   } catch (err) {
+    // Silently ignore aborted requests (user clicked Clear All)
+    if (err.name === 'AbortError') return;
     console.error('Correlation error:', err);
     Plotly.newPlot('corrPlot', [], {
       annotations: [{
         text: 'Error computing correlation',
         xref: 'paper', yref: 'paper', x: 0.5, y: 0.5,
         showarrow: false, font: { size: 13, color: '#c62828' }
-      }]
-    }, { responsive: true });
+      }],
+      margin: CMP_MARGIN,
+      plot_bgcolor: PLOT_CONFIG.bg, paper_bgcolor: PLOT_CONFIG.paperBg
+    }, { responsive: true, displaylogo: false, showLink: false });
+  } finally {
+    _corrAbort = null;
   }
 }
 
@@ -298,16 +410,27 @@ function saveCmpState() {
 }
 
 function restoreCmpState() {
-  const raw = sessionStorage.getItem('cmpState');
+  var raw = sessionStorage.getItem('cmpState');
   if (!raw) return;
 
   try {
-    const state = JSON.parse(raw);
+    var state = JSON.parse(raw);
 
     if (state.sigA) cmp.sigA = state.sigA;
     if (state.sigB) cmp.sigB = state.sigB;
-    if (state.dataA) cmp.dataA = state.dataA;
-    if (state.dataB) cmp.dataB = state.dataB;
+    if (state.dataA) {
+      cmp.dataA = state.dataA;
+      // Reconstruct timePlot if not present (old session data)
+      if (!cmp.dataA.timePlot && cmp.dataA.time) {
+        cmp.dataA.timePlot = cmpEpochMsToDateStrings(cmp.dataA.time);
+      }
+    }
+    if (state.dataB) {
+      cmp.dataB = state.dataB;
+      if (!cmp.dataB.timePlot && cmp.dataB.time) {
+        cmp.dataB.timePlot = cmpEpochMsToDateStrings(cmp.dataB.time);
+      }
+    }
 
     if (cmp.dataA || cmp.dataB) {
       renderChips();
@@ -326,6 +449,8 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (GlobalNav._ready) await GlobalNav._ready;
 
   GlobalNav.onSidebarSignalClick = onCmpSignalClick;
+
+  GlobalNav.onSelectionChange = resetComparison;
 
   await restoreCmpState();
 });
