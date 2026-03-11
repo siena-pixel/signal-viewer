@@ -1,4 +1,4 @@
-"""Unit tests for resampling module."""
+"""Unit tests for the resampling module (LTTB and simple decimation)."""
 
 import unittest
 import numpy as np
@@ -6,182 +6,134 @@ import numpy as np
 from signal_viewer.processing.resampling import lttb_downsample, simple_decimate
 
 
+# ---------------------------------------------------------------------------
+# LTTB downsampling
+# ---------------------------------------------------------------------------
+
 class TestLTTBDownsample(unittest.TestCase):
-    """Test LTTB downsampling algorithm."""
+    """Tests for the Largest-Triangle-Three-Buckets algorithm."""
 
-    def test_lttb_basic(self):
-        """Test basic LTTB downsampling."""
-        time = np.linspace(0, 10, 10000)
-        signal = np.sin(time)
+    def test_basic_output_length(self):
+        t = np.linspace(0, 10, 10_000)
+        t_ds, s_ds = lttb_downsample(t, np.sin(t), target_points=100)
+        self.assertEqual(len(t_ds), 100)
+        self.assertEqual(len(s_ds), 100)
 
-        time_ds, signal_ds = lttb_downsample(time, signal, target_points=100)
+    def test_preserves_first_and_last(self):
+        t = np.linspace(0, 10, 1000)
+        s = np.sin(t)
+        t_ds, s_ds = lttb_downsample(t, s, target_points=50)
+        self.assertEqual(t_ds[0], t[0])
+        self.assertEqual(t_ds[-1], t[-1])
+        self.assertEqual(s_ds[0], s[0])
+        self.assertEqual(s_ds[-1], s[-1])
 
-        self.assertEqual(len(time_ds), 100)
-        self.assertEqual(len(signal_ds), 100)
+    def test_shorter_than_target_returns_unchanged(self):
+        t = np.linspace(0, 10, 50)
+        s = np.sin(t)
+        t_ds, s_ds = lttb_downsample(t, s, target_points=100)
+        np.testing.assert_array_equal(t_ds, t)
+        np.testing.assert_array_equal(s_ds, s)
 
-    def test_lttb_preserves_first_last(self):
-        """Test that LTTB preserves first and last points."""
-        time = np.linspace(0, 10, 1000)
-        signal = np.sin(time)
+    def test_various_target_lengths(self):
+        t = np.linspace(0, 10, 5000)
+        s = np.cos(t) + 0.1 * np.sin(10 * t)
+        for target in (50, 100, 200):
+            t_ds, s_ds = lttb_downsample(t, s, target_points=target)
+            self.assertEqual(len(t_ds), target)
+            self.assertEqual(len(s_ds), target)
 
-        time_ds, signal_ds = lttb_downsample(time, signal, target_points=50)
-
-        # First and last should be preserved
-        self.assertEqual(time_ds[0], time[0])
-        self.assertEqual(time_ds[-1], time[-1])
-        self.assertEqual(signal_ds[0], signal[0])
-        self.assertEqual(signal_ds[-1], signal[-1])
-
-    def test_lttb_shorter_than_target(self):
-        """Test LTTB with data shorter than target."""
-        time = np.linspace(0, 10, 50)
-        signal = np.sin(time)
-
-        time_ds, signal_ds = lttb_downsample(time, signal, target_points=100)
-
-        # Should return unchanged
-        np.testing.assert_array_equal(time_ds, time)
-        np.testing.assert_array_equal(signal_ds, signal)
-
-    def test_lttb_output_length(self):
-        """Test output length matches target."""
-        time = np.linspace(0, 10, 5000)
-        signal = np.cos(time) + 0.1 * np.sin(10 * time)
-
-        for target in [50, 100, 200]:
-            time_ds, signal_ds = lttb_downsample(time, signal, target_points=target)
-            self.assertEqual(len(time_ds), target)
-            self.assertEqual(len(signal_ds), target)
-
-    def test_lttb_mismatched_lengths(self):
-        """Test ValueError for mismatched array lengths."""
-        time = np.linspace(0, 10, 100)
-        signal = np.sin(np.linspace(0, 10, 50))
-
+    def test_mismatched_lengths_raises(self):
         with self.assertRaises(ValueError):
-            lttb_downsample(time, signal, target_points=50)
+            lttb_downsample(
+                np.linspace(0, 10, 100),
+                np.sin(np.linspace(0, 10, 50)),
+                target_points=50,
+            )
 
-    def test_lttb_visual_preservation(self):
-        """Test that LTTB preserves visual shape (peak detection)."""
-        # Create a signal with clear peaks
-        time = np.linspace(0, 10, 5000)
-        signal = np.sin(2 * np.pi * time) + 0.5 * np.sin(8 * np.pi * time)
+    def test_visual_preservation_peaks(self):
+        """Downsampled signal should retain a significant fraction of peaks."""
+        t = np.linspace(0, 10, 5000)
+        s = np.sin(2 * np.pi * t) + 0.5 * np.sin(8 * np.pi * t)
+        _, s_ds = lttb_downsample(t, s, target_points=500)
 
-        time_ds, signal_ds = lttb_downsample(time, signal, target_points=500)
+        count_peaks = lambda arr: sum(
+            1 for i in range(1, len(arr) - 1)
+            if arr[i] > arr[i - 1] and arr[i] > arr[i + 1]
+        )
+        self.assertGreater(count_peaks(s_ds), count_peaks(s) // 5)
 
-        # Find peaks in both
-        def find_peaks(s):
-            peaks = []
-            for i in range(1, len(s) - 1):
-                if s[i] > s[i - 1] and s[i] > s[i + 1]:
-                    peaks.append(i)
-            return len(peaks)
+    def test_returns_copies(self):
+        t = np.linspace(0, 10, 1000)
+        s = np.sin(t)
+        t_ds, s_ds = lttb_downsample(t, s, target_points=100)
+        t_ds[0] = 999
+        s_ds[0] = 999
+        self.assertNotEqual(t[0], 999)
+        self.assertNotEqual(s[0], 999)
 
-        peaks_original = find_peaks(signal)
-        peaks_downsampled = find_peaks(signal_ds)
 
-        # Downsampled should still have significant peaks
-        self.assertGreater(peaks_downsampled, peaks_original // 5)
-
-    def test_lttb_copies_arrays(self):
-        """Test that LTTB returns copies, not references."""
-        time = np.linspace(0, 10, 1000)
-        signal = np.sin(time)
-
-        time_ds, signal_ds = lttb_downsample(time, signal, target_points=100)
-
-        # Modify downsampled
-        time_ds[0] = 999
-        signal_ds[0] = 999
-
-        # Original should be unchanged
-        self.assertNotEqual(time[0], 999)
-        self.assertNotEqual(signal[0], 999)
-
+# ---------------------------------------------------------------------------
+# Simple decimation
+# ---------------------------------------------------------------------------
 
 class TestSimpleDecimate(unittest.TestCase):
-    """Test simple decimation algorithm."""
+    """Tests for uniform-stride decimation."""
 
-    def test_decimate_basic(self):
-        """Test basic decimation."""
-        time = np.linspace(0, 10, 1000)
-        signal = np.sin(time)
+    def test_basic_length(self):
+        t = np.linspace(0, 10, 1000)
+        t_d, s_d = simple_decimate(t, np.sin(t), factor=5)
+        self.assertLessEqual(len(t_d), len(t) // 5 + 1)
+        self.assertLessEqual(len(s_d), len(t) // 5 + 1)
 
-        time_d, signal_d = simple_decimate(time, signal, factor=5)
+    def test_includes_last_point(self):
+        t = np.linspace(0, 10, 100)
+        s = np.sin(t)
+        t_d, s_d = simple_decimate(t, s, factor=10)
+        self.assertEqual(t_d[-1], t[-1])
+        self.assertEqual(s_d[-1], s[-1])
 
-        # Should have roughly 1/5 of samples (plus potentially last point)
-        self.assertTrue(len(time_d) <= len(time) // 5 + 1)
-        self.assertTrue(len(signal_d) <= len(signal) // 5 + 1)
+    def test_factor_one_returns_copy(self):
+        t = np.linspace(0, 10, 100)
+        s = np.sin(t)
+        t_d, s_d = simple_decimate(t, s, factor=1)
+        np.testing.assert_array_equal(t_d, t)
+        np.testing.assert_array_equal(s_d, s)
 
-    def test_decimate_includes_last_point(self):
-        """Test that decimation includes the last point."""
-        time = np.linspace(0, 10, 100)
-        signal = np.sin(time)
-
-        time_d, signal_d = simple_decimate(time, signal, factor=10)
-
-        # Last point should always be included
-        self.assertEqual(time_d[-1], time[-1])
-        self.assertEqual(signal_d[-1], signal[-1])
-
-    def test_decimate_factor_one(self):
-        """Test decimation with factor 1 returns copy."""
-        time = np.linspace(0, 10, 100)
-        signal = np.sin(time)
-
-        time_d, signal_d = simple_decimate(time, signal, factor=1)
-
-        np.testing.assert_array_equal(time_d, time)
-        np.testing.assert_array_equal(signal_d, signal)
-
-    def test_decimate_invalid_factor(self):
-        """Test ValueError for invalid decimation factor."""
-        time = np.linspace(0, 10, 100)
-        signal = np.sin(time)
-
+    def test_invalid_factor_raises(self):
+        t = np.linspace(0, 10, 100)
+        s = np.sin(t)
         with self.assertRaises(ValueError):
-            simple_decimate(time, signal, factor=0)
-
+            simple_decimate(t, s, factor=0)
         with self.assertRaises(ValueError):
-            simple_decimate(time, signal, factor=-1)
+            simple_decimate(t, s, factor=-1)
 
-    def test_decimate_mismatched_lengths(self):
-        """Test ValueError for mismatched array lengths."""
-        time = np.linspace(0, 10, 100)
-        signal = np.sin(np.linspace(0, 10, 50))
-
+    def test_mismatched_lengths_raises(self):
         with self.assertRaises(ValueError):
-            simple_decimate(time, signal, factor=5)
+            simple_decimate(
+                np.linspace(0, 10, 100),
+                np.sin(np.linspace(0, 10, 50)),
+                factor=5,
+            )
 
-    def test_decimate_selects_every_nth(self):
-        """Test that decimation selects every nth point."""
-        time = np.arange(100, dtype=float)
-        signal = np.arange(100, dtype=float) * 2
+    def test_selects_every_nth(self):
+        t = np.arange(100, dtype=float)
+        s = t * 2
+        t_d, s_d = simple_decimate(t, s, factor=10)
+        expected_idx = list(range(0, 100, 10))
+        if 99 not in expected_idx:
+            expected_idx.append(99)
+        np.testing.assert_array_equal(t_d[:-1], t[expected_idx[:-1]])
+        np.testing.assert_array_equal(s_d[:-1], s[expected_idx[:-1]])
 
-        time_d, signal_d = simple_decimate(time, signal, factor=10)
-
-        # Should select indices 0, 10, 20, ..., 90, 99
-        expected_indices = list(range(0, 100, 10))
-        if 99 not in expected_indices:
-            expected_indices.append(99)
-
-        np.testing.assert_array_equal(time_d[:-1], time[expected_indices[:-1]])
-        np.testing.assert_array_equal(signal_d[:-1], signal[expected_indices[:-1]])
-
-    def test_decimate_copies_arrays(self):
-        """Test that decimation returns copies."""
-        time = np.linspace(0, 10, 100)
-        signal = np.sin(time)
-
-        time_d, signal_d = simple_decimate(time, signal, factor=5)
-
-        # Modify decimated
-        time_d[0] = 999
-        signal_d[0] = 999
-
-        # Original should be unchanged
-        self.assertNotEqual(time[0], 999)
-        self.assertNotEqual(signal[0], 999)
+    def test_returns_copies(self):
+        t = np.linspace(0, 10, 100)
+        s = np.sin(t)
+        t_d, s_d = simple_decimate(t, s, factor=5)
+        t_d[0] = 999
+        s_d[0] = 999
+        self.assertNotEqual(t[0], 999)
+        self.assertNotEqual(s[0], 999)
 
 
 if __name__ == "__main__":

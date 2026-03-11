@@ -420,17 +420,24 @@ class SignalHandler(BaseHandler):
             signal_name = batch_meta["signal_names"][idx]
             units = batch_meta["units"][idx]
 
+            out_samples = len(signal_full)
             result = {
                 "time": time_full,
                 "values": signal_full,
                 "name": signal_name,
                 "units": units,
-                "samples": len(signal_full),
+                "samples": out_samples,
                 "total_samples": total_samples,
                 "t_start": t_start,
                 "t_end": t_end,
                 "windowed": is_windowed,
             }
+
+            if config.VERBOSE:
+                logger.info(
+                    "SignalHandler %s/%d: total=%d out=%d windowed=%s",
+                    batch, idx, total_samples, out_samples, is_windowed,
+                )
 
             self.write_json(result)
         except tornado.web.HTTPError:

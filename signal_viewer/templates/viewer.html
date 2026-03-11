@@ -97,6 +97,44 @@ const _PLOTLY_CFG = {
 
 // ── Helpers ───────────────────────────────────────────────────────────────
 
+/** Client-side diagnostic logger.  Writes to the browser console AND
+ *  accumulates a rolling buffer (last 200 entries) that can be dumped
+ *  from DevTools via `window.__svLog`.
+ */
+const _LOG_BUF_MAX = 200;
+const _logBuf = [];
+function _log(level, ...args) {
+  const ts = new Date().toISOString();
+  const msg = `[SV ${ts}] ${args.map(a => (typeof a === 'object' ? JSON.stringify(a) : a)).join(' ')}`;
+  _logBuf.push(msg);
+  if (_logBuf.length > _LOG_BUF_MAX) _logBuf.shift();
+  if (level === 'error') console.error(msg);
+  else if (level === 'warn') console.warn(msg);
+  else console.log(msg);
+}
+window.__svLog = _logBuf;  // accessible from DevTools: copy(window.__svLog.join('\n'))
+
+/** Safe min/max over an array — avoids Function.prototype.apply stack overflow
+ *  that crashes Firefox/Chrome tabs with large typed arrays (>~100 k elements).
+ */
+function safeMin(arr) {
+  let m = Infinity;
+  for (let i = 0, n = arr.length; i < n; i++) { if (arr[i] < m) m = arr[i]; }
+  return m;
+}
+function safeMax(arr) {
+  let m = -Infinity;
+  for (let i = 0, n = arr.length; i < n; i++) { if (arr[i] > m) m = arr[i]; }
+  return m;
+}
+
+/** Maximum number of points per trace before we refuse to plot and warn.
+ *  Prevents the browser from allocating multi-GB WebGL buffers that crash
+ *  the renderer process.  The server already downsamples, so hitting this
+ *  cap indicates a bug or misconfiguration.
+ */
+const CLIENT_MAX_POINTS = 500000;
+
 /**
  * Build custom tick labels for a linear x-axis that displays epoch ms as
  * human-readable time strings.  Returns { tickvals, ticktext } for the
@@ -212,6 +250,15 @@ async function addSignal(batch, idx, name, units) {
     const data = await apiFetch(url);
     hideLoading();
 
+    // Safety cap: refuse to plot if server returned far more points than expected
+    const nPts = data.time ? data.time.length : 0;
+    _log('info', `addSignal ${batch}/${idx}: ${nPts} pts received (total ${data.total_samples || '?'})`);
+    if (nPts > CLIENT_MAX_POINTS) {
+      _log('warn', `Signal too large (${nPts} > ${CLIENT_MAX_POINTS}). Refusing to plot to avoid crash.`);
+      showToast(`Signal has ${nPts.toLocaleString()} points — too large for the browser. Try a smaller downsample target.`, 'error');
+      return;
+    }
+
     signals.push({
       batch, idx,
       name: data.name || name,
@@ -319,6 +366,7 @@ function _xAxisConfig(extra) {
 function renderPlot() {
   const el = document.getElementById('plotArea');
   if (signals.length === 0) {
+    Plotly.purge(el);
     Plotly.newPlot(el, [], {
       xaxis: { visible: false }, yaxis: { visible: false },
       plot_bgcolor: PLOT_CONFIG.bg, paper_bgcolor: PLOT_CONFIG.paperBg,
@@ -348,6 +396,8 @@ function renderPlot() {
 }
 
 function plotOverlay(el) {
+  const totalPts = signals.reduce((s, sig) => s + sig.timeRaw.length, 0);
+  _log('info', `plotOverlay: ${signals.length} signals, ${totalPts} total points`);
   const traces = signals.map(sig => ({
     x: sig.timeRaw, y: sig.values,
     name: legendLabel(sig),
@@ -360,8 +410,9 @@ function plotOverlay(el) {
 
   // Compute explicit time range (NEVER rely on autorange — it fires
   // spurious relayout events that create feedback loops)
-  const allT = signals.flatMap(s => s.timeRaw);
-  const tLo = Math.min(...allT), tHi = Math.max(...allT);
+  // NOTE: uses safe loop-based min/max to avoid stack overflow on large arrays
+  let tLo = Infinity, tHi = -Infinity;
+  signals.forEach(s => { const lo = safeMin(s.timeRaw), hi = safeMax(s.timeRaw); if (lo < tLo) tLo = lo; if (hi > tHi) tHi = hi; });
   const pad = (tHi - tLo) * 0.01 || 1;
   const xLo = tLo - pad, xHi = tHi + pad;
   const ticks = _buildTimeTicks(xLo, xHi);
@@ -392,10 +443,13 @@ function plotOverlay(el) {
 
   _lastPlotRange = { lo: xLo, hi: xHi };
   _lastPlotTime = Date.now();
+  Plotly.purge(el);  // release previous WebGL contexts before creating new ones
   Plotly.newPlot(el, traces, layout, _PLOTLY_CFG);
 }
 
 function plotSubplots(el) {
+  const totalPts = signals.reduce((s, sig) => s + sig.timeRaw.length, 0);
+  _log('info', `plotSubplots: ${signals.length} signals, ${totalPts} total points`);
   const n = signals.length;
   const totalHeight = 100 + n * SUBPLOT_HEIGHT_PER;
   const gap = 0.08;
@@ -414,8 +468,9 @@ function plotSubplots(el) {
   // Compute explicit synced time range for ALL subplot axes
   // (NO matches:'x' — it causes event-routing bugs with scattergl;
   //  instead we set identical explicit range on every axis)
-  const allT = signals.flatMap(s => s.timeRaw);
-  const tLo = Math.min(...allT), tHi = Math.max(...allT);
+  // NOTE: uses safe loop-based min/max to avoid stack overflow on large arrays
+  let tLo = Infinity, tHi = -Infinity;
+  signals.forEach(s => { const lo = safeMin(s.timeRaw), hi = safeMax(s.timeRaw); if (lo < tLo) tLo = lo; if (hi > tHi) tHi = hi; });
   const pad = (tHi - tLo) * 0.01 || 1;
   const xLo = tLo - pad, xHi = tHi + pad;
   const ticks = _buildTimeTicks(xLo, xHi);
@@ -462,6 +517,7 @@ function plotSubplots(el) {
 
   _lastPlotRange = { lo: xLo, hi: xHi };
   _lastPlotTime = Date.now();
+  Plotly.purge(el);  // release previous WebGL contexts before creating new ones
   Plotly.newPlot(el, traces, layout, _PLOTLY_CFG);
 }
 
@@ -625,6 +681,7 @@ function _scheduleZoomFetch(tMin, tMax) {
  */
 async function _doZoomFetch(fetchMin, fetchMax, displayMin, displayMax) {
   if (signals.length === 0) return;
+  _log('info', `_doZoomFetch: fetch=[${fetchMin}, ${fetchMax}], display=[${displayMin}, ${displayMax}]`);
 
   // Abort any previous in-flight zoom fetches
   if (_zoomAbort) _zoomAbort.abort();
@@ -653,18 +710,28 @@ async function _doZoomFetch(fetchMin, fetchMax, displayMin, displayMax) {
     // Check abort wasn't called while we waited
     if (abortSignal.aborted) return;
 
-    // Update each signal's display data (guard against empty responses)
+    // Update each signal's display data (guard against empty responses + safety cap)
     let anyData = false;
+    let tooBig = false;
     results.forEach((data, i) => {
       if (data.time && data.time.length > 0 && data.values && data.values.length > 0) {
+        const n = data.time.length;
+        if (n > CLIENT_MAX_POINTS) {
+          _log('warn', `Zoom fetch signal ${i}: ${n} pts exceeds cap ${CLIENT_MAX_POINTS}, skipping`);
+          tooBig = true;
+          return;
+        }
         signals[i].timeRaw = data.time;
         signals[i].values  = data.values;
         anyData = true;
       }
     });
+    if (tooBig) {
+      _log('warn', 'One or more zoom fetch responses exceeded client safety cap');
+    }
 
     if (!anyData) {
-      console.warn('Zoom fetch returned no data for any signal');
+      _log('warn', 'Zoom fetch returned no data for any signal');
       _updateZoomIndicator('error');
       _isZoomFetching = false;
       return;
@@ -681,7 +748,8 @@ async function _doZoomFetch(fetchMin, fetchMax, displayMin, displayMax) {
 
     // Compute zoom level for indicator
     if (dMin != null && dMax != null) {
-      const fullSpan = Math.max(...signals.map(s => s.tEnd - s.tStart));
+      let fullSpan = 0;
+      signals.forEach(s => { const sp = s.tEnd - s.tStart; if (sp > fullSpan) fullSpan = sp; });
       const viewSpan = dMax - dMin;
       const zoomPct = fullSpan > 0 ? ((viewSpan / fullSpan) * 100) : 100;
       _updateZoomIndicator(zoomPct);
@@ -691,7 +759,7 @@ async function _doZoomFetch(fetchMin, fetchMax, displayMin, displayMax) {
 
   } catch (err) {
     if (err.name === 'AbortError') return; // expected on rapid zoom
-    console.warn('Zoom fetch failed:', err);
+    _log('error', 'Zoom fetch failed:', err.message, err.stack);
     _updateZoomIndicator('error');
   } finally {
     _isZoomFetching = false;
@@ -710,6 +778,8 @@ async function _doZoomFetch(fetchMin, fetchMax, displayMin, displayMax) {
 function _reactPlot(tMin, tMax) {
   const el = _plotEl || document.getElementById('plotArea');
   if (!el) return;
+  const totalPts = signals.reduce((s, sig) => s + sig.timeRaw.length, 0);
+  _log('info', `_reactPlot(${tMin}, ${tMax}): ${signals.length} signals, ${totalPts} total points, mode=${plotMode}`);
 
   // Always compute EXPLICIT x range — NEVER use autorange: true.
   // autorange: true triggers async relayout events from Plotly that create
@@ -720,8 +790,8 @@ function _reactPlot(tMin, tMax) {
     xHi = tMax;
   } else {
     // Overview: use full signal time extent with 1% padding
-    xLo = Math.min(...signals.map(s => s.tStart));
-    xHi = Math.max(...signals.map(s => s.tEnd));
+    xLo = Infinity; xHi = -Infinity;
+    signals.forEach(s => { if (s.tStart < xLo) xLo = s.tStart; if (s.tEnd > xHi) xHi = s.tEnd; });
     const pad = (xHi - xLo) * 0.01 || 1;
     xLo -= pad;
     xHi += pad;
@@ -825,7 +895,8 @@ function _reactPlot(tMin, tMax) {
   _lastPlotRange = { lo: xLo, hi: xHi };
   _lastPlotTime = Date.now();
 
-  // Full newPlot guarantees complete WebGL buffer refresh.
+  // Purge old WebGL contexts then full newPlot for complete buffer refresh.
+  Plotly.purge(el);
   Plotly.newPlot(el, traces, layout, _PLOTLY_CFG);
 
   // Re-attach event listeners (Plotly.newPlot purges them)

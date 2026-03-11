@@ -1,298 +1,215 @@
-"""Unit tests for signal cache module."""
+"""Unit tests for the LRU signal cache."""
 
-import unittest
 import threading
-import time
+import unittest
 import numpy as np
 
 from signal_viewer.core.signal_cache import SignalCache
 
 
+# ---------------------------------------------------------------------------
+# Basic put / get
+# ---------------------------------------------------------------------------
+
 class TestSignalCachePutGet(unittest.TestCase):
-    """Test basic put/get operations."""
+    """Round-trip and basic semantics."""
 
     def setUp(self):
-        """Set up test fixtures."""
         self.cache = SignalCache(max_memory_bytes=1_000_000)
 
-    def test_put_get_roundtrip(self):
-        """Test putting and getting data."""
-        key = "signal_001"
-        time_array = np.linspace(0, 10, 1000)
-        signal_array = np.sin(time_array)
+    def test_roundtrip(self):
+        t = np.linspace(0, 10, 1000)
+        s = np.sin(t)
+        self.cache.put("k1", t, s)
+        t2, s2 = self.cache.get("k1")
+        np.testing.assert_array_almost_equal(t2, t)
+        np.testing.assert_array_almost_equal(s2, s)
 
-        self.cache.put(key, time_array, signal_array)
-        result = self.cache.get(key)
+    def test_missing_key_returns_none(self):
+        self.assertIsNone(self.cache.get("nonexistent"))
 
-        self.assertIsNotNone(result)
-        time_retrieved, signal_retrieved = result
-        np.testing.assert_array_almost_equal(time_retrieved, time_array)
-        np.testing.assert_array_almost_equal(signal_retrieved, signal_array)
-
-    def test_get_nonexistent_key(self):
-        """Test getting non-existent key returns None."""
-        result = self.cache.get("nonexistent_key")
-        self.assertIsNone(result)
-
-    def test_put_mismatched_lengths(self):
-        """Test put with mismatched array lengths raises ValueError."""
-        key = "signal_001"
-        time_array = np.linspace(0, 10, 100)
-        signal_array = np.sin(np.linspace(0, 10, 50))  # Different length
-
+    def test_mismatched_lengths_raises(self):
         with self.assertRaises(ValueError):
-            self.cache.put(key, time_array, signal_array)
+            self.cache.put("k", np.zeros(100), np.zeros(50))
 
     def test_get_returns_copy(self):
-        """Test that get returns a copy, not the original."""
-        key = "signal_001"
-        time_array = np.linspace(0, 10, 100)
-        signal_array = np.sin(time_array)
+        t = np.linspace(0, 10, 100)
+        s = np.sin(t)
+        self.cache.put("k", t, s)
 
-        self.cache.put(key, time_array, signal_array)
-        time_retrieved, signal_retrieved = self.cache.get(key)
+        t2, s2 = self.cache.get("k")
+        t2[0] = 999
+        s2[0] = 999
 
-        # Modify the retrieved copy
-        time_retrieved[0] = 999
-        signal_retrieved[0] = 999
+        t3, s3 = self.cache.get("k")
+        self.assertNotEqual(t3[0], 999)
+        self.assertNotEqual(s3[0], 999)
 
-        # Get again and check original is unchanged
-        time_retrieved2, signal_retrieved2 = self.cache.get(key)
-        self.assertNotEqual(time_retrieved2[0], 999)
-        self.assertNotEqual(signal_retrieved2[0], 999)
 
+# ---------------------------------------------------------------------------
+# LRU eviction
+# ---------------------------------------------------------------------------
 
 class TestSignalCacheEviction(unittest.TestCase):
-    """Test LRU eviction when memory exceeded."""
+    """Memory-budget enforcement and LRU ordering."""
 
     def test_lru_eviction(self):
-        """Test that oldest entry is evicted when memory exceeded."""
-        # Create cache with very small memory budget to force eviction
         cache = SignalCache(max_memory_bytes=800)
+        for i, name in enumerate(("k1", "k2", "k3")):
+            t = np.linspace(0, 10, 40)
+            cache.put(name, t, np.sin(t + i))
+        # k1 should have been evicted
+        self.assertIsNone(cache.get("k1"))
 
-        # Add first entry (40 entries * 8 bytes * 2 = 640 bytes)
-        time1 = np.linspace(0, 10, 40)
-        signal1 = np.sin(time1)
-        cache.put("key1", time1, signal1)
-
-        # Add second entry (more data to exceed budget)
-        time2 = np.linspace(0, 10, 40)
-        signal2 = np.cos(time2)
-        cache.put("key2", time2, signal2)
-
-        # Add third entry (should force eviction of key1)
-        time3 = np.linspace(0, 10, 40)
-        signal3 = np.ones(40)
-        cache.put("key3", time3, signal3)
-
-        # key1 should be evicted due to LRU
-        self.assertIsNone(cache.get("key1"))
-
-    def test_get_updates_lru_order(self):
-        """Test that get updates LRU order."""
+    def test_get_refreshes_lru_order(self):
         cache = SignalCache(max_memory_bytes=20_000)
+        for i, name in enumerate(("k1", "k2")):
+            t = np.linspace(0, 10, 50)
+            cache.put(name, t, np.sin(t + i))
 
-        # Add entries
-        time1 = np.linspace(0, 10, 50)
-        signal1 = np.sin(time1)
-        cache.put("key1", time1, signal1)
+        _ = cache.get("k1")  # refresh k1
 
-        time2 = np.linspace(0, 10, 50)
-        signal2 = np.cos(time2)
-        cache.put("key2", time2, signal2)
+        t3 = np.linspace(0, 10, 50)
+        cache.put("k3", t3, np.tan(np.linspace(0, 1, 50)))
 
-        # Access key1 (makes it most recent)
-        _ = cache.get("key1")
+        # k1 should survive (accessed more recently than k2)
+        self.assertIsNotNone(cache.get("k1"))
 
-        # Add new entry (should evict key2, not key1)
-        time3 = np.linspace(0, 10, 50)
-        signal3 = np.tan(np.linspace(0, 1, 50))
-        cache.put("key3", time3, signal3)
 
-        # key1 should still exist (was accessed)
-        self.assertIsNotNone(cache.get("key1"))
-
+# ---------------------------------------------------------------------------
+# Invalidate / clear
+# ---------------------------------------------------------------------------
 
 class TestSignalCacheInvalidate(unittest.TestCase):
-    """Test invalidate functionality."""
 
     def test_invalidate_removes_entry(self):
-        """Test that invalidate removes an entry."""
         cache = SignalCache()
-        key = "signal_001"
-        time_array = np.linspace(0, 10, 100)
-        signal_array = np.sin(time_array)
+        t = np.linspace(0, 10, 100)
+        cache.put("k", t, np.sin(t))
+        self.assertIsNotNone(cache.get("k"))
+        cache.invalidate("k")
+        self.assertIsNone(cache.get("k"))
 
-        cache.put(key, time_array, signal_array)
-        self.assertIsNotNone(cache.get(key))
-
-        cache.invalidate(key)
-        self.assertIsNone(cache.get(key))
-
-    def test_invalidate_nonexistent_key(self):
-        """Test invalidate on non-existent key is safe."""
-        cache = SignalCache()
-        cache.invalidate("nonexistent_key")  # Should not raise
+    def test_invalidate_nonexistent_key_is_noop(self):
+        SignalCache().invalidate("nope")  # should not raise
 
 
 class TestSignalCacheClear(unittest.TestCase):
-    """Test clear functionality."""
 
     def test_clear_removes_all(self):
-        """Test that clear removes all entries."""
         cache = SignalCache()
-
-        # Add multiple entries
         for i in range(5):
-            time = np.linspace(0, 10, 100)
-            signal = np.sin(time + i)
-            cache.put(f"key{i}", time, signal)
-
-        # Clear cache
+            t = np.linspace(0, 10, 100)
+            cache.put(f"k{i}", t, np.sin(t + i))
         cache.clear()
-
-        # All should be gone
         for i in range(5):
-            self.assertIsNone(cache.get(f"key{i}"))
+            self.assertIsNone(cache.get(f"k{i}"))
 
+
+# ---------------------------------------------------------------------------
+# Statistics
+# ---------------------------------------------------------------------------
 
 class TestSignalCacheStats(unittest.TestCase):
-    """Test cache statistics."""
+    """Counters, memory tracking, and hit-rate calculation."""
 
-    def test_stats_format(self):
-        """Test stats returns correct structure."""
-        cache = SignalCache(max_memory_bytes=1_000_000)
-        stats = cache.stats()
+    def test_stat_keys(self):
+        stats = SignalCache(max_memory_bytes=1_000_000).stats()
+        for key in ("hits", "misses", "hit_rate", "memory_used",
+                     "memory_budget", "entries", "memory_percent"):
+            self.assertIn(key, stats)
 
-        self.assertIn("hits", stats)
-        self.assertIn("misses", stats)
-        self.assertIn("hit_rate", stats)
-        self.assertIn("memory_used", stats)
-        self.assertIn("memory_budget", stats)
-        self.assertIn("entries", stats)
-        self.assertIn("memory_percent", stats)
-
-    def test_stats_initial(self):
-        """Test initial stats values."""
-        cache = SignalCache()
-        stats = cache.stats()
-
+    def test_initial_values(self):
+        stats = SignalCache().stats()
         self.assertEqual(stats["hits"], 0)
         self.assertEqual(stats["misses"], 0)
         self.assertEqual(stats["hit_rate"], 0.0)
         self.assertEqual(stats["memory_used"], 0)
         self.assertEqual(stats["entries"], 0)
 
-    def test_stats_hit_rate(self):
-        """Test hit rate calculation."""
+    def test_hit_rate(self):
         cache = SignalCache()
-
-        time = np.linspace(0, 10, 100)
-        signal = np.sin(time)
-        cache.put("key1", time, signal)
-
-        # One hit
-        cache.get("key1")
-        # One miss
-        cache.get("nonexistent")
-
+        t = np.linspace(0, 10, 100)
+        cache.put("k", t, np.sin(t))
+        cache.get("k")          # hit
+        cache.get("missing")    # miss
         stats = cache.stats()
         self.assertEqual(stats["hits"], 1)
         self.assertEqual(stats["misses"], 1)
         self.assertAlmostEqual(stats["hit_rate"], 0.5)
 
-    def test_stats_memory_tracking(self):
-        """Test memory usage tracking."""
+    def test_memory_tracking(self):
         cache = SignalCache()
-
-        time = np.linspace(0, 10, 1000).astype(np.float64)
-        signal = np.sin(time).astype(np.float64)
-        cache.put("key1", time, signal)
-
+        t = np.linspace(0, 10, 1000).astype(np.float64)
+        s = np.sin(t).astype(np.float64)
+        cache.put("k", t, s)
         stats = cache.stats()
-        expected_memory = time.nbytes + signal.nbytes
-        self.assertEqual(stats["memory_used"], expected_memory)
+        self.assertEqual(stats["memory_used"], t.nbytes + s.nbytes)
         self.assertEqual(stats["entries"], 1)
 
-    def test_stats_memory_percent(self):
-        """Test memory percentage calculation."""
+    def test_memory_percent(self):
         cache = SignalCache(max_memory_bytes=1_000_000)
+        t = np.linspace(0, 10, 100)
+        cache.put("k", t, np.sin(t))
+        pct = cache.stats()["memory_percent"]
+        self.assertGreater(pct, 0)
+        self.assertLess(pct, 100)
 
-        time = np.linspace(0, 10, 100)
-        signal = np.sin(time)
-        cache.put("key1", time, signal)
 
-        stats = cache.stats()
-        memory_pct = stats["memory_percent"]
-        self.assertGreater(memory_pct, 0)
-        self.assertLess(memory_pct, 100)
-
+# ---------------------------------------------------------------------------
+# Thread safety
+# ---------------------------------------------------------------------------
 
 class TestSignalCacheThreadSafety(unittest.TestCase):
-    """Test thread safety."""
 
     def test_concurrent_put_get(self):
-        """Test concurrent put and get operations."""
         cache = SignalCache(max_memory_bytes=10_000_000)
         results = []
 
-        def worker(thread_id):
+        def worker(tid):
             for i in range(10):
-                key = f"key_{thread_id}_{i}"
-                time = np.linspace(0, 10, 100)
-                signal = np.sin(time + thread_id + i)
-                cache.put(key, time, signal)
-
-                # Try to get it back
-                result = cache.get(key)
-                results.append(result is not None)
+                t = np.linspace(0, 10, 100)
+                cache.put(f"k_{tid}_{i}", t, np.sin(t + tid + i))
+                results.append(cache.get(f"k_{tid}_{i}") is not None)
 
         threads = [threading.Thread(target=worker, args=(i,)) for i in range(5)]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
-
-        # All operations should succeed
         self.assertTrue(all(results))
 
     def test_concurrent_invalidate(self):
-        """Test concurrent invalidate operations."""
         cache = SignalCache()
-
-        # Pre-populate
         for i in range(20):
-            time = np.linspace(0, 10, 100)
-            signal = np.sin(time + i)
-            cache.put(f"key_{i}", time, signal)
+            t = np.linspace(0, 10, 100)
+            cache.put(f"k_{i}", t, np.sin(t + i))
 
-        def worker(thread_id):
+        def worker(tid):
             for i in range(5):
-                cache.invalidate(f"key_{thread_id * 5 + i}")
+                cache.invalidate(f"k_{tid * 5 + i}")
 
         threads = [threading.Thread(target=worker, args=(i,)) for i in range(4)]
         for t in threads:
             t.start()
         for t in threads:
             t.join()
+        self.assertEqual(cache.stats()["entries"], 0)
 
-        stats = cache.stats()
-        self.assertEqual(stats["entries"], 0)
 
+# ---------------------------------------------------------------------------
+# __repr__
+# ---------------------------------------------------------------------------
 
 class TestSignalCacheRepr(unittest.TestCase):
-    """Test string representation."""
 
     def test_repr(self):
-        """Test __repr__ method."""
         cache = SignalCache()
-        time = np.linspace(0, 10, 100)
-        signal = np.sin(time)
-        cache.put("key1", time, signal)
-
-        repr_str = repr(cache)
-        self.assertIn("SignalCache", repr_str)
-        self.assertIn("entries", repr_str)
+        t = np.linspace(0, 10, 100)
+        cache.put("k", t, np.sin(t))
+        r = repr(cache)
+        self.assertIn("SignalCache", r)
+        self.assertIn("entries", r)
 
 
 if __name__ == "__main__":

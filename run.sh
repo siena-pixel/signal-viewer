@@ -14,4 +14,4 @@ export SIGNAL_VIEWER_DEBUG=true
 echo "Starting Engineering Signal Viewer..."
 echo "Open http://127.0.0.1:8050 in your browser"
 echo ""
-python -m signal_viewer.server.app "$@"
+python3 -m signal_viewer.server.app "$@"

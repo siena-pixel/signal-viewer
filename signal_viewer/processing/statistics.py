@@ -27,7 +27,8 @@ try:
         ]
         logger.info('Loaded native rainflow accelerator: %s', _so_path)
 except Exception as exc:
-    logger.warning('Could not load native rainflow library: %s', exc)
+    logger.debug('Could not load native rainflow library: %s', exc)
+    logger.info('Native rainflow accelerator not available — using pure-Python fallback')
     _c_lib = None
 
 

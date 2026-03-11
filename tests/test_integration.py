@@ -1,16 +1,18 @@
 """
-Integration tests for Engineering Time Series Signal Viewer.
+Integration tests for the Signal Viewer web application.
 
 Tests the Tornado web server, API endpoints, and data handling using
-tornado.testing.AsyncHTTPTestCase. Includes:
-  - Server startup and page rendering
-  - API endpoints for metadata cascading (serials, steps, files, batches)
-  - Signal loading and downsampling
-  - Analysis endpoints (stats, correlation, trend, etc.)
-  - Error handling (404, 400 responses)
-  - Cache statistics endpoint
+``tornado.testing.AsyncHTTPTestCase``.  Covers:
 
-When h5py is not installed, tests use MockHDF5File for full coverage.
+- Server startup and page rendering
+- Cascading metadata API (serials → steps → files → batches)
+- Signal loading, windowed queries, and downsampling
+- Analysis endpoints (stats, correlation, trend)
+- Error handling (404, 400, invalid JSON)
+- Cache statistics and filesystem rescan
+
+When tornado is not installed (e.g. system Python on macOS) the entire
+module is skipped gracefully.
 """
 
 import base64
@@ -24,31 +26,47 @@ from typing import Dict
 from urllib.parse import quote
 
 import numpy as np
-import tornado.testing
-import tornado.ioloop
+
+try:
+    import tornado.testing
+    import tornado.ioloop
+    _HAS_TORNADO = True
+except ModuleNotFoundError:
+    _HAS_TORNADO = False
 
 from signal_viewer import config
 from signal_viewer.config import HDF5Schema as S
 from signal_viewer.core.hdf5_reader import create_test_file
-from signal_viewer.server.app import make_app
+
+if _HAS_TORNADO:
+    from signal_viewer.server.app import make_app
 
 
-class IntegrationTestBase(tornado.testing.AsyncHTTPTestCase):
-    """Base class for integration tests with test data setup."""
+# ---------------------------------------------------------------------------
+# Base class
+# ---------------------------------------------------------------------------
+
+_BASE = tornado.testing.AsyncHTTPTestCase if _HAS_TORNADO else unittest.TestCase
+
+
+@unittest.skipUnless(_HAS_TORNADO, "tornado is not installed")
+class IntegrationTestBase(_BASE):
+    """Shared fixture: temp data directory + running Tornado app.
+
+    Creates two serial numbers (SN001, SN002) each with one procedure
+    folder and two run folders containing a test HDF5 file.
+    """
+
+    # -- Setup / teardown ---------------------------------------------------
 
     def setUp(self):
-        """Set up test server and temporary data directory."""
-        # Save original config
-        self.original_data_root = config.DATA_ROOT
+        self._original_data_root = config.DATA_ROOT
 
-        # Create temporary data root
         self.test_data_dir = tempfile.mkdtemp()
-
-        # Structure: serial / folder_1 / folder_2 / file.h5
         self.serials = ["SN001", "SN002"]
         self.folder1s = ["p001_test"]
         self.folder2s = ["run_1", "run_2"]
-        self.file_paths = {}
+        self.file_paths: Dict[str, Dict[str, Dict[str, str]]] = {}
 
         for serial in self.serials:
             self.file_paths[serial] = {}
@@ -57,428 +75,316 @@ class IntegrationTestBase(tornado.testing.AsyncHTTPTestCase):
                 for f2 in self.folder2s:
                     dir_path = Path(self.test_data_dir) / serial / f1 / f2
                     dir_path.mkdir(parents=True)
-                    file_path = dir_path / "data.h5"
-                    create_test_file(str(file_path))
-                    self.file_paths[serial][f1][f2] = str(file_path)
+                    fp = dir_path / "data.h5"
+                    create_test_file(str(fp))
+                    self.file_paths[serial][f1][f2] = str(fp)
 
-        # Configure app to use temp directory BEFORE parent setUp creates app
         config.DATA_ROOT = Path(self.test_data_dir)
-
-        # Call parent setUp (starts server)
         try:
             super().setUp()
         except Exception:
-            # Restore config on error
-            config.DATA_ROOT = self.original_data_root
+            config.DATA_ROOT = self._original_data_root
             raise
 
     def tearDown(self):
-        """Clean up test server and temporary data."""
         super().tearDown()
-
-        # Restore original config
-        config.DATA_ROOT = self.original_data_root
-
-        # Clean up temp directory
+        config.DATA_ROOT = self._original_data_root
         if os.path.exists(self.test_data_dir):
             shutil.rmtree(self.test_data_dir)
 
     def get_app(self):
-        """Create and return the Tornado application for testing."""
         return make_app()
 
+    # -- Convenience helpers ------------------------------------------------
+
     def encode_file_path(self, file_path: str) -> str:
-        """Encode file path as base64 for API calls."""
+        """Base64-encode a file path for use in API URLs."""
         return base64.urlsafe_b64encode(file_path.encode()).decode()
 
     def get_json(self, path: str, **kwargs) -> Dict:
-        """Make GET request and parse JSON response."""
-        response = self.fetch(path, **kwargs)
-        return json.loads(response.body.decode())
+        """GET *path*, parse the JSON body, and return it."""
+        return json.loads(self.fetch(path, **kwargs).body.decode())
 
     def post_json(self, path: str, data: Dict, **kwargs) -> Dict:
-        """Make POST request with JSON body and parse response."""
-        kwargs['body'] = json.dumps(data)
-        kwargs['method'] = 'POST'
-        response = self.fetch(path, **kwargs)
-        return json.loads(response.body.decode())
+        """POST JSON *data* to *path*, parse the response, and return it."""
+        kwargs["body"] = json.dumps(data)
+        kwargs["method"] = "POST"
+        return json.loads(self.fetch(path, **kwargs).body.decode())
 
+
+# ---------------------------------------------------------------------------
+# Page rendering
+# ---------------------------------------------------------------------------
 
 class TestPageHandlers(IntegrationTestBase):
-    """Test page rendering endpoints."""
+    """Verify that every HTML page renders without error."""
 
     def test_root_page(self):
-        """Test GET / returns viewer page (home)."""
-        response = self.fetch('/')
-        self.assertEqual(response.code, 200)
-        self.assertIn('text/html', response.headers.get('Content-Type', ''))
+        resp = self.fetch("/")
+        self.assertEqual(resp.code, 200)
+        self.assertIn("text/html", resp.headers.get("Content-Type", ""))
 
     def test_analysis_page(self):
-        """Test GET /analysis returns analysis page."""
-        response = self.fetch('/analysis')
-        self.assertEqual(response.code, 200)
-        self.assertIn('text/html', response.headers.get('Content-Type', ''))
+        resp = self.fetch("/analysis")
+        self.assertEqual(resp.code, 200)
+        self.assertIn("text/html", resp.headers.get("Content-Type", ""))
 
     def test_comparison_page(self):
-        """Test GET /comparison returns comparison page."""
-        response = self.fetch('/comparison')
-        self.assertEqual(response.code, 200)
-        self.assertIn('text/html', response.headers.get('Content-Type', ''))
+        resp = self.fetch("/comparison")
+        self.assertEqual(resp.code, 200)
+        self.assertIn("text/html", resp.headers.get("Content-Type", ""))
 
     def test_docs_page(self):
-        """Test GET /docs returns documentation page."""
-        response = self.fetch('/docs')
-        self.assertEqual(response.code, 200)
-        self.assertIn('text/html', response.headers.get('Content-Type', ''))
+        resp = self.fetch("/docs")
+        self.assertEqual(resp.code, 200)
+        self.assertIn("text/html", resp.headers.get("Content-Type", ""))
 
+
+# ---------------------------------------------------------------------------
+# Metadata cascading API
+# ---------------------------------------------------------------------------
 
 class TestSerialsCascading(IntegrationTestBase):
-    """Test cascading API endpoints for metadata."""
+    """Test the serials → steps → files metadata cascade."""
 
     def test_get_serials(self):
-        """Test GET /api/serials returns serial numbers."""
-        response = self.get_json('/api/serials')
-
-        self.assertIn('serials', response)
-        self.assertEqual(len(response['serials']), 2)
-        self.assertIn('SN001', response['serials'])
-        self.assertIn('SN002', response['serials'])
+        data = self.get_json("/api/serials")
+        self.assertIn("serials", data)
+        self.assertEqual(len(data["serials"]), 2)
+        self.assertIn("SN001", data["serials"])
+        self.assertIn("SN002", data["serials"])
 
     def test_get_steps_for_serial(self):
-        """Test GET /api/serials/{serial}/steps returns folder_1/folder_2 steps."""
-        response = self.get_json('/api/serials/SN001/steps')
+        data = self.get_json("/api/serials/SN001/steps")
+        self.assertIn("steps", data)
+        self.assertEqual(len(data["steps"]), 2)
+        self.assertIn("p001_test/run_1", data["steps"])
+        self.assertIn("p001_test/run_2", data["steps"])
 
-        self.assertIn('steps', response)
-        # 1 folder_1 × 2 folder_2s = 2 step combinations
-        self.assertEqual(len(response['steps']), 2)
-        self.assertIn('p001_test/run_1', response['steps'])
-        self.assertIn('p001_test/run_2', response['steps'])
-
-    def test_get_steps_for_missing_serial(self):
-        """Test GET /api/serials/{serial}/steps with missing serial returns 404."""
-        response = self.fetch('/api/serials/MISSING/steps')
-        self.assertEqual(response.code, 404)
+    def test_get_steps_missing_serial_returns_404(self):
+        self.assertEqual(self.fetch("/api/serials/MISSING/steps").code, 404)
 
     def test_get_files_for_step(self):
-        """Test GET /api/serials/{serial}/steps/{step}/files returns files."""
-        step = quote('p001_test/run_1', safe='')
-        response = self.get_json(f'/api/serials/SN001/steps/{step}/files')
+        step = quote("p001_test/run_1", safe="")
+        data = self.get_json(f"/api/serials/SN001/steps/{step}/files")
+        self.assertIn("files", data)
+        self.assertEqual(len(data["files"]), 1)
+        self.assertIsInstance(data["files"][0], dict)
+        self.assertIn("path", data["files"][0])
 
-        self.assertIn('files', response)
-        self.assertEqual(len(response['files']), 1)
-        # Files are returned as dicts with metadata
-        self.assertIsInstance(response['files'][0], dict)
-        self.assertIn('path', response['files'][0])
+    def test_get_files_missing_step_returns_404(self):
+        self.assertEqual(
+            self.fetch("/api/serials/SN001/steps/missing_step/files").code,
+            404,
+        )
 
-    def test_get_files_for_missing_step(self):
-        """Test GET /api/serials/{serial}/steps/{step}/files with invalid step."""
-        response = self.fetch('/api/serials/SN001/steps/missing_step/files')
-        self.assertEqual(response.code, 404)
 
+# ---------------------------------------------------------------------------
+# Batches and signals
+# ---------------------------------------------------------------------------
 
 class TestBatchesAndSignals(IntegrationTestBase):
-    """Test batch and signal loading endpoints."""
+    """Test batch listing, signal loading, windowing, and downsampling."""
+
+    def _encoded(self) -> str:
+        return self.encode_file_path(
+            self.file_paths["SN001"]["p001_test"]["run_1"]
+        )
+
+    # -- Batches / metadata -------------------------------------------------
 
     def test_get_batches(self):
-        """Test GET /api/files/{encoded_path}/batches returns batches."""
-        file_path = self.file_paths['SN001']['p001_test']['run_1']
-        encoded = self.encode_file_path(file_path)
-
-        response = self.get_json(f'/api/files/{encoded}/batches')
-
-        self.assertIn('batches', response)
-        self.assertIn(S.DEFAULT_GROUP, response['batches'])
+        data = self.get_json(f"/api/files/{self._encoded()}/batches")
+        self.assertIn("batches", data)
+        self.assertIn(S.DEFAULT_GROUP, data["batches"])
 
     def test_get_batch_metadata(self):
-        """Test GET /api/files/{encoded}/batches/{batch}/meta returns metadata."""
-        file_path = self.file_paths['SN001']['p001_test']['run_1']
-        encoded = self.encode_file_path(file_path)
-
-        response = self.get_json(
-            f'/api/files/{encoded}/batches/{S.DEFAULT_GROUP}/meta'
+        data = self.get_json(
+            f"/api/files/{self._encoded()}/batches/{S.DEFAULT_GROUP}/meta"
         )
+        self.assertIn("signal_names", data)
+        self.assertIn("units", data)
+        self.assertEqual(len(data["signal_names"]), 4)
+        self.assertEqual(len(data["units"]), 4)
 
-        self.assertIn('signal_names', response)
-        self.assertIn('units', response)
-        self.assertEqual(len(response['signal_names']), 4)
-        self.assertEqual(len(response['units']), 4)
+    # -- Signal loading -----------------------------------------------------
 
     def test_get_signal(self):
-        """Test GET /api/files/{encoded}/batches/{batch}/signals/{idx} loads signal."""
-        file_path = self.file_paths['SN001']['p001_test']['run_1']
-        encoded = self.encode_file_path(file_path)
-
-        response = self.get_json(
-            f'/api/files/{encoded}/batches/{S.DEFAULT_GROUP}/signals/0'
+        """Full signal load — Type A signal 0 has 800 samples."""
+        data = self.get_json(
+            f"/api/files/{self._encoded()}/batches/{S.DEFAULT_GROUP}/signals/0"
         )
-
-        self.assertIn('time', response)
-        self.assertIn('values', response)
-        self.assertIn('name', response)
-        self.assertIn('units', response)
-        self.assertIn('samples', response)
-        # DEFAULT_GROUP (GROUP_T0) is Type A: signal 0 has n_samples=800
-        self.assertEqual(response['samples'], 800)
-        self.assertEqual(len(response['time']), 800)
-        self.assertEqual(len(response['values']), 800)
+        for key in ("time", "values", "name", "units", "samples"):
+            self.assertIn(key, data)
+        self.assertEqual(data["samples"], 800)
+        self.assertEqual(len(data["time"]), 800)
+        self.assertEqual(len(data["values"]), 800)
 
     def test_get_signal_with_downsampling(self):
-        """Test signal downsampling with downsample query parameter."""
-        file_path = self.file_paths['SN001']['p001_test']['run_1']
-        encoded = self.encode_file_path(file_path)
-
-        response = self.get_json(
-            f'/api/files/{encoded}/batches/{S.DEFAULT_GROUP}/signals/0?downsample=100'
+        data = self.get_json(
+            f"/api/files/{self._encoded()}/batches/{S.DEFAULT_GROUP}"
+            f"/signals/0?downsample=100"
         )
-
-        self.assertIn('time', response)
-        self.assertIn('values', response)
-        # Downsampled to ~100 points
-        self.assertLess(len(response['values']), 200)
+        self.assertIn("values", data)
+        self.assertLess(len(data["values"]), 200)
 
     def test_get_signal_with_time_window(self):
-        """Test signal loading with t_min/t_max time window parameters."""
-        file_path = self.file_paths['SN001']['p001_test']['run_1']
-        encoded = self.encode_file_path(file_path)
-
-        # First load full signal to get time extent
+        """Request a ~50 % window in the middle of the signal."""
         full = self.get_json(
-            f'/api/files/{encoded}/batches/{S.DEFAULT_GROUP}/signals/0'
+            f"/api/files/{self._encoded()}/batches/{S.DEFAULT_GROUP}/signals/0"
         )
-        t_start = full['t_start']
-        t_end = full['t_end']
-        total = full['total_samples']
-
-        # Request a ~50% window in the middle
-        mid = (t_start + t_end) / 2
-        quarter = (t_end - t_start) / 4
-        t_min = mid - quarter
-        t_max = mid + quarter
+        mid = (full["t_start"] + full["t_end"]) / 2
+        quarter = (full["t_end"] - full["t_start"]) / 4
 
         windowed = self.get_json(
-            f'/api/files/{encoded}/batches/{S.DEFAULT_GROUP}/signals/0'
-            f'?t_min={t_min}&t_max={t_max}'
+            f"/api/files/{self._encoded()}/batches/{S.DEFAULT_GROUP}/signals/0"
+            f"?t_min={mid - quarter}&t_max={mid + quarter}"
         )
-
-        self.assertIn('time', windowed)
-        self.assertIn('values', windowed)
-        self.assertTrue(windowed['windowed'])
-        # Windowed result should have fewer samples than full signal
-        self.assertLess(len(windowed['values']), total)
-        # total_samples should still report the FULL signal length
-        self.assertEqual(windowed['total_samples'], total)
+        self.assertTrue(windowed["windowed"])
+        self.assertLess(len(windowed["values"]), full["total_samples"])
+        self.assertEqual(windowed["total_samples"], full["total_samples"])
 
     def test_get_signal_windowed_with_downsampling(self):
-        """Test time-windowed signal with additional downsampling."""
-        file_path = self.file_paths['SN001']['p001_test']['run_1']
-        encoded = self.encode_file_path(file_path)
-
+        """Combine time window with downsample=50."""
         full = self.get_json(
-            f'/api/files/{encoded}/batches/{S.DEFAULT_GROUP}/signals/0'
+            f"/api/files/{self._encoded()}/batches/{S.DEFAULT_GROUP}/signals/0"
         )
-        t_start = full['t_start']
-        t_end = full['t_end']
-
         windowed = self.get_json(
-            f'/api/files/{encoded}/batches/{S.DEFAULT_GROUP}/signals/0'
-            f'?t_min={t_start}&t_max={t_end}&downsample=50'
+            f"/api/files/{self._encoded()}/batches/{S.DEFAULT_GROUP}/signals/0"
+            f"?t_min={full['t_start']}&t_max={full['t_end']}&downsample=50"
         )
+        self.assertEqual(len(windowed["time"]), len(windowed["values"]))
+        self.assertLessEqual(len(windowed["values"]), 100)
 
-        self.assertIn('time', windowed)
-        self.assertIn('values', windowed)
-        self.assertEqual(len(windowed['time']), len(windowed['values']))
-        # Should be downsampled to roughly 50 points
-        self.assertLessEqual(len(windowed['values']), 100)
+    # -- Error cases --------------------------------------------------------
 
-    def test_get_signal_invalid_index(self):
-        """Test GET /api/files/{encoded}/batches/{batch}/signals/{idx} with bad index."""
-        file_path = self.file_paths['SN001']['p001_test']['run_1']
-        encoded = self.encode_file_path(file_path)
-
-        response = self.fetch(
-            f'/api/files/{encoded}/batches/{S.DEFAULT_GROUP}/signals/999'
+    def test_get_signal_invalid_index_returns_404(self):
+        resp = self.fetch(
+            f"/api/files/{self._encoded()}/batches/{S.DEFAULT_GROUP}/signals/999"
         )
-        self.assertEqual(response.code, 404)
+        self.assertEqual(resp.code, 404)
 
-    def test_get_signal_invalid_file_path(self):
-        """Test /api/files/{encoded}/batches with invalid encoded path."""
-        bad_encoded = base64.urlsafe_b64encode(b'/nonexistent/path.h5').decode()
-        response = self.fetch(f'/api/files/{bad_encoded}/batches')
-        self.assertEqual(response.code, 400)
+    def test_get_signal_invalid_file_path_returns_400(self):
+        bad = base64.urlsafe_b64encode(b"/nonexistent/path.h5").decode()
+        self.assertEqual(self.fetch(f"/api/files/{bad}/batches").code, 400)
 
+
+# ---------------------------------------------------------------------------
+# Analysis endpoints
+# ---------------------------------------------------------------------------
 
 class TestAnalysisEndpoints(IntegrationTestBase):
-    """Test analysis API endpoints."""
+    """Test stats, trend, and correlation analysis."""
 
     def setUp(self):
-        """Set up test data and get file info."""
         super().setUp()
-        self.file_path = self.file_paths['SN001']['p001_test']['run_1']
+        self.file_path = self.file_paths["SN001"]["p001_test"]["run_1"]
 
     def test_stats_analysis(self):
-        """Test POST /api/analysis/stats computes signal statistics."""
-        payload = {
-            'file_path': self.file_path,
-            'batch': S.DEFAULT_GROUP,
-            'signal_idx': 0,
-        }
-
-        response = self.post_json('/api/analysis/stats', payload)
-
-        expected_stats = [
-            'count',
-            'mean',
-            'std',
-            'min',
-            'max',
-            'median',
-        ]
-        for stat in expected_stats:
-            self.assertIn(stat, response)
+        data = self.post_json("/api/analysis/stats", {
+            "file_path": self.file_path,
+            "batch": S.DEFAULT_GROUP,
+            "signal_idx": 0,
+        })
+        for key in ("count", "mean", "std", "min", "max", "median"):
+            self.assertIn(key, data)
 
     def test_trend_analysis(self):
-        """Test POST /api/analysis/trend fits polynomial trend."""
-        payload = {
-            'file_path': self.file_path,
-            'batch': S.DEFAULT_GROUP,
-            'signal_idx': 0,
-            'degree': 1,
-        }
-
-        response = self.post_json('/api/analysis/trend', payload)
-
-        self.assertIn('coefficients', response)
-        self.assertIn('fitted', response)
-        self.assertIn('residuals', response)
-        self.assertIn('time', response)
-        # DEFAULT_GROUP (GROUP_T0) is Type A: signal 0 has n_sample=800
-        self.assertEqual(len(response['fitted']), 800)
-        self.assertEqual(len(response['residuals']), 800)
+        data = self.post_json("/api/analysis/trend", {
+            "file_path": self.file_path,
+            "batch": S.DEFAULT_GROUP,
+            "signal_idx": 0,
+            "degree": 1,
+        })
+        for key in ("coefficients", "fitted", "residuals", "time"):
+            self.assertIn(key, data)
+        self.assertEqual(len(data["fitted"]), 800)
+        self.assertEqual(len(data["residuals"]), 800)
 
     def test_correlation_analysis(self):
-        """Test POST /api/analysis/correlation computes cross-correlation."""
-        payload = {
-            'file_path_a': self.file_path,
-            'batch_a': S.DEFAULT_GROUP,
-            'signal_idx_a': 0,
-            'file_path_b': self.file_path,
-            'batch_b': S.DEFAULT_GROUP,
-            'signal_idx_b': 1,
-        }
+        data = self.post_json("/api/analysis/correlation", {
+            "file_path_a": self.file_path,
+            "batch_a": S.DEFAULT_GROUP,
+            "signal_idx_a": 0,
+            "file_path_b": self.file_path,
+            "batch_b": S.DEFAULT_GROUP,
+            "signal_idx_b": 1,
+        })
+        for key in ("lags", "correlation", "max_lag"):
+            self.assertIn(key, data)
+        self.assertEqual(len(data["lags"]), len(data["correlation"]))
 
-        response = self.post_json('/api/analysis/correlation', payload)
-
-        self.assertIn('lags', response)
-        self.assertIn('correlation', response)
-        self.assertIn('max_lag', response)
-        self.assertEqual(
-            len(response['lags']), len(response['correlation'])
+    def test_missing_required_fields_returns_400(self):
+        resp = self.fetch(
+            "/api/analysis/stats",
+            body=json.dumps({"batch": S.DEFAULT_GROUP, "signal_idx": 0}),
+            method="POST",
         )
+        self.assertEqual(resp.code, 400)
 
-    def test_missing_required_fields(self):
-        """Test analysis endpoints return 400 for missing required fields."""
-        payload = {
-            'batch': S.DEFAULT_GROUP,
-            'signal_idx': 0,
-        }
 
-        response = self.fetch(
-            '/api/analysis/stats',
-            body=json.dumps(payload),
-            method='POST',
-        )
-        self.assertEqual(response.code, 400)
-
+# ---------------------------------------------------------------------------
+# Cache and rescan
+# ---------------------------------------------------------------------------
 
 class TestCacheAndRescan(IntegrationTestBase):
-    """Test cache and rescan endpoints."""
+    """Test the cache stats and filesystem rescan endpoints."""
 
     def test_cache_stats(self):
-        """Test GET /api/cache/stats returns cache statistics."""
-        # Load a signal to populate cache
-        file_path = self.file_paths['SN001']['p001_test']['run_1']
-        encoded = self.encode_file_path(file_path)
-        self.get_json(
-            f'/api/files/{encoded}/batches/{S.DEFAULT_GROUP}/signals/0'
+        enc = self.encode_file_path(
+            self.file_paths["SN001"]["p001_test"]["run_1"]
         )
+        self.get_json(f"/api/files/{enc}/batches/{S.DEFAULT_GROUP}/signals/0")
 
-        response = self.get_json('/api/cache/stats')
-
-        self.assertIn('hits', response)
-        self.assertIn('misses', response)
-        self.assertIn('entries', response)
-        self.assertIn('memory_used', response)
-        self.assertIn('memory_budget', response)
+        stats = self.get_json("/api/cache/stats")
+        for key in ("hits", "misses", "entries", "memory_used", "memory_budget"):
+            self.assertIn(key, stats)
 
     def test_rescan_endpoint(self):
-        """Test POST /api/rescan re-scans filesystem."""
-        payload = {}
-        response = self.post_json('/api/rescan', payload)
+        data = self.post_json("/api/rescan", {})
+        self.assertEqual(data["status"], "success")
+        self.assertEqual(data["serial_count"], 2)
+        # 2 serials × 1 folder_1 × 2 folder_2s = 4 steps
+        self.assertEqual(data["total_steps"], 4)
 
-        self.assertIn('status', response)
-        self.assertEqual(response['status'], 'success')
-        self.assertIn('serial_count', response)
-        self.assertIn('total_steps', response)
-        self.assertEqual(response['serial_count'], 2)
-        # 2 serials × 1 folder_1 × 2 folder_2s = 4 total steps
-        self.assertEqual(response['total_steps'], 4)
 
+# ---------------------------------------------------------------------------
+# Error handling and edge cases
+# ---------------------------------------------------------------------------
 
 class TestErrorHandling(IntegrationTestBase):
-    """Test error handling and edge cases."""
+    """CORS headers, OPTIONS preflight, invalid JSON, caching behaviour."""
 
     def test_cors_headers(self):
-        """Test CORS headers are set in API responses."""
-        response = self.fetch('/api/serials')
+        resp = self.fetch("/api/serials")
+        self.assertEqual(resp.headers.get("Access-Control-Allow-Origin"), "*")
+        self.assertIn("GET", resp.headers.get("Access-Control-Allow-Methods"))
 
-        self.assertEqual(
-            response.headers.get('Access-Control-Allow-Origin'), '*'
-        )
-        self.assertIn(
-            'GET',
-            response.headers.get('Access-Control-Allow-Methods'),
-        )
+    def test_options_preflight(self):
+        self.assertEqual(self.fetch("/api/serials", method="OPTIONS").code, 204)
 
-    def test_options_request(self):
-        """Test OPTIONS requests for CORS preflight."""
-        response = self.fetch('/api/serials', method='OPTIONS')
-        self.assertEqual(response.code, 204)
-
-    def test_invalid_json_in_post(self):
-        """Test POST endpoint with invalid JSON."""
-        response = self.fetch(
-            '/api/analysis/stats',
-            body='invalid json {',
-            method='POST',
+    def test_invalid_json_returns_500(self):
+        resp = self.fetch(
+            "/api/analysis/stats", body="invalid json {", method="POST"
         )
-        self.assertEqual(response.code, 500)
+        self.assertEqual(resp.code, 500)
 
     def test_signal_caching(self):
-        """Test that signals are cached after first load."""
-        file_path = self.file_paths['SN001']['p001_test']['run_1']
-        encoded = self.encode_file_path(file_path)
-
-        # First load
-        response1 = self.get_json(
-            f'/api/files/{encoded}/batches/{S.DEFAULT_GROUP}/signals/0'
+        """Second GET for the same signal should hit the cache."""
+        enc = self.encode_file_path(
+            self.file_paths["SN001"]["p001_test"]["run_1"]
         )
+        url = f"/api/files/{enc}/batches/{S.DEFAULT_GROUP}/signals/0"
 
-        # Get cache stats
-        stats1 = self.get_json('/api/cache/stats')
-        initial_entries = stats1['entries']
+        resp1 = self.get_json(url)
+        entries_after_first = self.get_json("/api/cache/stats")["entries"]
 
-        # Second load (should hit cache)
-        response2 = self.get_json(
-            f'/api/files/{encoded}/batches/{S.DEFAULT_GROUP}/signals/0'
-        )
+        resp2 = self.get_json(url)
+        entries_after_second = self.get_json("/api/cache/stats")["entries"]
 
-        stats2 = self.get_json('/api/cache/stats')
-
-        # Cache should still have same number of entries
-        self.assertEqual(stats2['entries'], initial_entries)
-        # Data should be identical
-        self.assertEqual(response1['values'], response2['values'])
+        self.assertEqual(entries_after_second, entries_after_first)
+        self.assertEqual(resp1["values"], resp2["values"])
 
 
-if __name__ == '__main__':
+if __name__ == "__main__":
     unittest.main()
