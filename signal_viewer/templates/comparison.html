@@ -200,7 +200,7 @@ function plotOverlay() {
       x: cmp.dataA.timePlot || cmp.dataA.time,
       y: cmp.dataA.values,
       name: cmp.sigA.name,
-      type: 'scattergl', mode: 'lines',
+      type: BrowserCaps.scatterType, mode: 'lines',
       line: { color: PLOT_CONFIG.CMP_COLORS[0], width: 1.5 },
       hoverinfo: 'none'
     });
@@ -211,7 +211,7 @@ function plotOverlay() {
       x: cmp.dataB.timePlot || cmp.dataB.time,
       y: cmp.dataB.values,
       name: cmp.sigB.name,
-      type: 'scattergl', mode: 'lines',
+      type: BrowserCaps.scatterType, mode: 'lines',
       line: { color: PLOT_CONFIG.CMP_COLORS[1], width: 1.5 },
       hoverinfo: 'none'
     };
@@ -275,7 +275,7 @@ function plotXY() {
   const trace = {
     x: cmp.dataA.values.slice(0, minLen),
     y: cmp.dataB.values.slice(0, minLen),
-    type: 'scattergl', mode: 'markers',
+    type: BrowserCaps.scatterType, mode: 'markers',
     marker: { size: 2, color: PLOT_CONFIG.CMP_COLORS[2], opacity: 0.5 },
     hovertemplate: 'X: %{x:.4f}<br>Y: %{y:.4f}<extra></extra>'
   };
@@ -364,7 +364,7 @@ async function plotCorrelation() {
 
     const trace = {
       x: result.lags, y: result.correlation,
-      type: 'scattergl', mode: 'lines',
+      type: BrowserCaps.scatterType, mode: 'lines',
       line: { color: PLOT_CONFIG.CMP_COLORS[2], width: 2 },
       fill: 'tozeroy', fillcolor: 'rgba(16,185,129,0.1)',
       hovertemplate: 'Lag: %{x}<br>Corr: %{y:.4f}<extra></extra>'

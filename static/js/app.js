@@ -14,11 +14,58 @@
 // 1. CONFIGURATION & CONSTANTS
 // ============================================================================
 
+// ── Browser capability detection ──────────────────────────────────────────
+// Firefox ESR 91.x has severe WebGL limitations (low context cap ~8, buggy
+// scattergl, aggressive memory limits).  Detect it early so every module can
+// adapt without duplicating UA-sniffing logic.
+const BrowserCaps = (function () {
+  const ua = navigator.userAgent || '';
+
+  // Detect Firefox and its major version
+  const ffMatch = ua.match(/Firefox\/(\d+)/);
+  const ffVersion = ffMatch ? parseInt(ffMatch[1], 10) : 0;
+  const isFirefox = ffVersion > 0;
+
+  // "Legacy" = Firefox < 100 (covers 91 ESR and other old ESR branches)
+  const isLegacyFirefox = isFirefox && ffVersion < 100;
+
+  // Probe WebGL availability (without creating a persistent context)
+  let webglOk = false;
+  try {
+    const c = document.createElement('canvas');
+    const gl = c.getContext('webgl') || c.getContext('experimental-webgl');
+    if (gl) {
+      webglOk = true;
+      // Immediately lose the context so it doesn't count against the cap
+      const ext = gl.getExtension('WEBGL_lose_context');
+      if (ext) ext.loseContext();
+    }
+  } catch (_) { /* no WebGL */ }
+
+  // On legacy Firefox, disable WebGL plotting even if technically available
+  // because scattergl triggers silent tab crashes under memory pressure.
+  const useWebGL = webglOk && !isLegacyFirefox;
+
+  return Object.freeze({
+    isFirefox:       isFirefox,
+    firefoxVersion:  ffVersion,
+    isLegacyFirefox: isLegacyFirefox,
+    webglAvailable:  webglOk,
+    useWebGL:        useWebGL,
+    // Plotly trace type: 'scattergl' (fast, WebGL) or 'scatter' (safe, SVG)
+    scatterType:     useWebGL ? 'scattergl' : 'scatter',
+    // Lower caps for legacy browsers to prevent OOM / tab crashes
+    maxPoints:       isLegacyFirefox ? 100000 : 500000,
+    maxSignals:      isLegacyFirefox ? 3 : 5,
+    downsampleTarget: isLegacyFirefox ? 2000 : 5000,
+  });
+})();
+
 const APP_CONFIG = {
   API_TIMEOUT: 60000,
   DEFAULT_DECIMALS: 4,
   TOAST_DURATION: 4000,
-  DEFAULT_DOWNSAMPLE: 5000
+  DEFAULT_DOWNSAMPLE: BrowserCaps.downsampleTarget
 };
 
 const SIGNAL_COLORS = [
@@ -714,6 +761,17 @@ document.addEventListener('DOMContentLoaded', () => {
   hideLoading();
   // Init GlobalNav (stores promise for pages to await)
   GlobalNav._ready = GlobalNav.init();
+
+  // ── Legacy Firefox warning ────────────────────────────────────────────
+  if (BrowserCaps.isLegacyFirefox) {
+    const msg = `Firefox ${BrowserCaps.firefoxVersion} detected \u2014 using safe SVG rendering `
+      + `(max ${BrowserCaps.maxSignals} signals, ${(BrowserCaps.maxPoints/1000).toFixed(0)}k pts). `
+      + 'Upgrade to Firefox 100+ for full WebGL performance.';
+    showToast(msg, 'warning', 10000);
+    console.warn('[SignalViewer]', msg);
+  } else if (!BrowserCaps.webglAvailable) {
+    showToast('WebGL not available \u2014 plots will use slower SVG rendering.', 'warning', 8000);
+  }
 });
 
 document.addEventListener('keydown', (e) => {
@@ -733,5 +791,5 @@ window.addEventListener('error', () => { hideLoading(); });
 
 window.APP = {
   showToast, showLoading, hideLoading,
-  formatNumber, encodePath, decodePath, GlobalNav
+  formatNumber, encodePath, decodePath, GlobalNav, BrowserCaps
 };
