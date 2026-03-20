@@ -34,6 +34,7 @@ APP_TITLE = 'Engineering Signal Viewer & Analyzer'
 # Change these values to match your HDF5 file structure.
 # All readers, indexers, and data generators use this single source of truth.
 
+
 class HDF5Schema:
     """
     Defines the HDF5 file structure: dataset names, directory conventions,
@@ -44,28 +45,19 @@ class HDF5Schema:
       - folder_1: pXXX_label  (e.g. p001_motor_test)
       - folder_2: any subfolder name (e.g. run_nominal, warmup)
 
-    HDF5 internal layout (per group):
-      /GROUP_NAME/
-          GROUP_NAME_V    float64 [n_signals, max(n_samples)]  signal values
-          GROUP_NAME_TIM  float64 [n_signals]  epoch time (ms) of first sample
-          GROUP_NAME_FRE  float64 [n_signals]  sampling frequency (Hz)
-          GROUP_NAME_SAM  int64   [n_signals]  valid sample count per signal
-          GROUP_NAME_N    str     [n_signals]  signal names
-          GROUP_NAME_UNI  str     [n_signals]  units
-
-      Type B groups additionally contain:
-          GROUP_NAME_ERR  float64 [n_signals, max(n_samples)]  signal errors
-          GROUP_NAME_SQI  float64 [n_signals]  signal quality metric
-          GROUP_NAME_TLS  float64 [n_signals]  max error gap (seconds)
+    HDF5 internal layout:
+      Each group can have its own dataset names, configured via GROUP_DS_NAMES.
+      Common (required) dataset keys: VALUE, TIME, SAMPLING_FREQ, NSAMPLE, NAMES, UNITS
+      Type B additional (optional) keys: ERROR, SQI, TLS
 
     Batch types:
-      - Type A: only the base datasets above
-      - Type B: base datasets + _ERR, _SQI, _TLS
-      Both types have _SAM (valid sample count per signal).
+      - Type A: only the common datasets (no ERROR key or ERROR maps to None)
+      - Type B: common + ERROR, SQI, TLS
+      Both types have NSAMPLE (valid sample count per signal).
 
     Time construction (both types):
-      time[i] = TIM[i] + arange(length) / FRE[i]
-      where TIM is epoch time in milliseconds.
+      time[i] = TIM[i] + arange(length) * (1000.0 / FRE[i])
+      where TIM is epoch time in milliseconds and FRE is in Hz.
     """
 
     # -- Filesystem conventions -----------------------------------------------
@@ -74,27 +66,54 @@ class HDF5Schema:
     FILE_EXTENSION = '*.h5'          # glob pattern for HDF5 files
     FILE_SUFFIX    = '.h5'           # file suffix for generated files
 
-    # -- HDF5 groups of interest ----------------------------------------------
-    GROUP_NAMES = ['GROUP_T0', 'GROUP_T1']  # top-level groups to read
+    # -- Per-group dataset name mapping ---------------------------------------
+    # Keys: VALUE, TIME, SAMPLING_FREQ, NSAMPLE, NAMES, UNITS  (required)
+    #        ERROR, SQI, TLS  (optional — present in Type B groups only)
+    #
+    # Each group maps these logical keys to the actual HDF5 dataset name.
+    # Group names are derived automatically: list(GROUP_DS_NAMES.keys()).
+    GROUP_DS_NAMES = {
+        'GROUP_T0': {
+            'VALUE':         'GROUP_T0_V',
+            'TIME':          'GROUP_T0_TIM',
+            'SAMPLING_FREQ': 'GROUP_T0_FRE',
+            'NSAMPLE':       'GROUP_T0_SAM',
+            'NAMES':         'GROUP_T0_N',
+            'UNITS':         'GROUP_T0_UNI',
+            # Type A — no ERROR/SQI/TLS
+        },
+        'GROUP_T1': {
+            'VALUE':         'GROUP_T1_V',
+            'TIME':          'GROUP_T1_TIM',
+            'SAMPLING_FREQ': 'GROUP_T1_FRE',
+            'NSAMPLE':       'GROUP_T1_SAM',
+            'NAMES':         'GROUP_T1_N',
+            'UNITS':         'GROUP_T1_UNI',
+            # Type B — additional datasets
+            'ERROR':         'GROUP_T1_ERR',
+            'SQI':           'GROUP_T1_SQI',
+            'TLS':           'GROUP_T1_TLS',
+        },
+    }
 
-    # -- Dataset suffix convention (appended to group name) -------------------
-    # Common to both Type A and Type B:
-    VALUE_SUFFIX         = '_V'      # float64 [n_signals, max(n_samples)]
-    TIME_SUFFIX          = '_TIM'    # float64 [n_signals]  epoch ms of first sample
-    SAMPLING_FREQ_SUFFIX = '_FRE'    # float64 [n_signals]  sampling frequency (Hz)
-    NSAMPLE_SUFFIX       = '_SAM'    # int64   [n_signals]  valid sample count
-    NAMES_SUFFIX         = '_N'      # str     [n_signals]  signal names
-    UNITS_SUFFIX         = '_UNI'    # str     [n_signals]  units
-
-    # Type B additional datasets:
-    ERROR_SUFFIX         = '_ERR'    # float64 [n_signals, max(n_samples)]  errors
-    SQI_SUFFIX           = '_SQI'    # float64 [n_signals]  signal quality index
-    TLS_SUFFIX           = '_TLS'    # float64 [n_signals]  max error gap (seconds)
-
-    # -- Default group for tests / mocks --------------------------------------
-    DEFAULT_GROUP   = 'GROUP_T0'
+    # -- Derived helpers (read-only) ------------------------------------------
 
     @classmethod
-    def ds(cls, group: str, suffix: str) -> str:
-        """Build a dataset name: GROUP_NAME + suffix."""
-        return group + suffix
+    def group_names(cls):
+        """Return list of configured group names."""
+        return list(cls.GROUP_DS_NAMES.keys())
+
+    @classmethod
+    def ds(cls, group, key):
+        """Look up the actual HDF5 dataset name for a group and logical key."""
+        return cls.GROUP_DS_NAMES[group][key]
+
+    @classmethod
+    def has_ds(cls, group, key):
+        """Check whether a logical key is configured for a group."""
+        return key in cls.GROUP_DS_NAMES.get(group, {})
+
+    @classmethod
+    def default_group(cls):
+        """Return the first configured group name (used in tests/mocks)."""
+        return cls.group_names()[0]

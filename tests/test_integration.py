@@ -196,11 +196,11 @@ class TestBatchesAndSignals(IntegrationTestBase):
     def test_get_batches(self):
         data = self.get_json(f"/api/files/{self._encoded()}/batches")
         self.assertIn("batches", data)
-        self.assertIn(S.DEFAULT_GROUP, data["batches"])
+        self.assertIn(S.default_group(), data["batches"])
 
     def test_get_batch_metadata(self):
         data = self.get_json(
-            f"/api/files/{self._encoded()}/batches/{S.DEFAULT_GROUP}/meta"
+            f"/api/files/{self._encoded()}/batches/{S.default_group()}/meta"
         )
         self.assertIn("signal_names", data)
         self.assertIn("units", data)
@@ -212,7 +212,7 @@ class TestBatchesAndSignals(IntegrationTestBase):
     def test_get_signal(self):
         """Full signal load — Type A signal 0 has 800 samples."""
         data = self.get_json(
-            f"/api/files/{self._encoded()}/batches/{S.DEFAULT_GROUP}/signals/0"
+            f"/api/files/{self._encoded()}/batches/{S.default_group()}/signals/0"
         )
         for key in ("time", "values", "name", "units", "samples"):
             self.assertIn(key, data)
@@ -222,7 +222,7 @@ class TestBatchesAndSignals(IntegrationTestBase):
 
     def test_get_signal_with_downsampling(self):
         data = self.get_json(
-            f"/api/files/{self._encoded()}/batches/{S.DEFAULT_GROUP}"
+            f"/api/files/{self._encoded()}/batches/{S.default_group()}"
             f"/signals/0?downsample=100"
         )
         self.assertIn("values", data)
@@ -231,13 +231,13 @@ class TestBatchesAndSignals(IntegrationTestBase):
     def test_get_signal_with_time_window(self):
         """Request a ~50 % window in the middle of the signal."""
         full = self.get_json(
-            f"/api/files/{self._encoded()}/batches/{S.DEFAULT_GROUP}/signals/0"
+            f"/api/files/{self._encoded()}/batches/{S.default_group()}/signals/0"
         )
         mid = (full["t_start"] + full["t_end"]) / 2
         quarter = (full["t_end"] - full["t_start"]) / 4
 
         windowed = self.get_json(
-            f"/api/files/{self._encoded()}/batches/{S.DEFAULT_GROUP}/signals/0"
+            f"/api/files/{self._encoded()}/batches/{S.default_group()}/signals/0"
             f"?t_min={mid - quarter}&t_max={mid + quarter}"
         )
         self.assertTrue(windowed["windowed"])
@@ -247,10 +247,10 @@ class TestBatchesAndSignals(IntegrationTestBase):
     def test_get_signal_windowed_with_downsampling(self):
         """Combine time window with downsample=50."""
         full = self.get_json(
-            f"/api/files/{self._encoded()}/batches/{S.DEFAULT_GROUP}/signals/0"
+            f"/api/files/{self._encoded()}/batches/{S.default_group()}/signals/0"
         )
         windowed = self.get_json(
-            f"/api/files/{self._encoded()}/batches/{S.DEFAULT_GROUP}/signals/0"
+            f"/api/files/{self._encoded()}/batches/{S.default_group()}/signals/0"
             f"?t_min={full['t_start']}&t_max={full['t_end']}&downsample=50"
         )
         self.assertEqual(len(windowed["time"]), len(windowed["values"]))
@@ -260,7 +260,7 @@ class TestBatchesAndSignals(IntegrationTestBase):
 
     def test_get_signal_invalid_index_returns_404(self):
         resp = self.fetch(
-            f"/api/files/{self._encoded()}/batches/{S.DEFAULT_GROUP}/signals/999"
+            f"/api/files/{self._encoded()}/batches/{S.default_group()}/signals/999"
         )
         self.assertEqual(resp.code, 404)
 
@@ -283,7 +283,7 @@ class TestAnalysisEndpoints(IntegrationTestBase):
     def test_stats_analysis(self):
         data = self.post_json("/api/analysis/stats", {
             "file_path": self.file_path,
-            "batch": S.DEFAULT_GROUP,
+            "batch": S.default_group(),
             "signal_idx": 0,
         })
         for key in ("count", "mean", "std", "min", "max", "median"):
@@ -292,7 +292,7 @@ class TestAnalysisEndpoints(IntegrationTestBase):
     def test_trend_analysis(self):
         data = self.post_json("/api/analysis/trend", {
             "file_path": self.file_path,
-            "batch": S.DEFAULT_GROUP,
+            "batch": S.default_group(),
             "signal_idx": 0,
             "degree": 1,
         })
@@ -304,10 +304,10 @@ class TestAnalysisEndpoints(IntegrationTestBase):
     def test_correlation_analysis(self):
         data = self.post_json("/api/analysis/correlation", {
             "file_path_a": self.file_path,
-            "batch_a": S.DEFAULT_GROUP,
+            "batch_a": S.default_group(),
             "signal_idx_a": 0,
             "file_path_b": self.file_path,
-            "batch_b": S.DEFAULT_GROUP,
+            "batch_b": S.default_group(),
             "signal_idx_b": 1,
         })
         for key in ("lags", "correlation", "max_lag"):
@@ -317,7 +317,7 @@ class TestAnalysisEndpoints(IntegrationTestBase):
     def test_missing_required_fields_returns_400(self):
         resp = self.fetch(
             "/api/analysis/stats",
-            body=json.dumps({"batch": S.DEFAULT_GROUP, "signal_idx": 0}),
+            body=json.dumps({"batch": S.default_group(), "signal_idx": 0}),
             method="POST",
         )
         self.assertEqual(resp.code, 400)
@@ -334,7 +334,7 @@ class TestCacheAndRescan(IntegrationTestBase):
         enc = self.encode_file_path(
             self.file_paths["SN001"]["p001_test"]["run_1"]
         )
-        self.get_json(f"/api/files/{enc}/batches/{S.DEFAULT_GROUP}/signals/0")
+        self.get_json(f"/api/files/{enc}/batches/{S.default_group()}/signals/0")
 
         stats = self.get_json("/api/cache/stats")
         for key in ("hits", "misses", "entries", "memory_used", "memory_budget"):
@@ -374,7 +374,7 @@ class TestErrorHandling(IntegrationTestBase):
         enc = self.encode_file_path(
             self.file_paths["SN001"]["p001_test"]["run_1"]
         )
-        url = f"/api/files/{enc}/batches/{S.DEFAULT_GROUP}/signals/0"
+        url = f"/api/files/{enc}/batches/{S.default_group()}/signals/0"
 
         resp1 = self.get_json(url)
         entries_after_first = self.get_json("/api/cache/stats")["entries"]

@@ -5,31 +5,15 @@ Provides robust HDF5 file reading with lazy loading, caching support, and
 comprehensive metadata handling. Includes a MockHDF5File class for testing
 without h5py dependency.
 
-HDF5 internal layout (per configured group):
-  /GROUP_NAME/
-      GROUP_NAME_V    float64 [n_signals, max(n_samples)]  signal values
-      GROUP_NAME_TIM  float64 [n_signals]  epoch time (ms) of first sample
-      GROUP_NAME_FRE  float64 [n_signals]  sampling frequency (Hz)
-      GROUP_NAME_SAM  int64   [n_signals]  valid sample count per signal
-      GROUP_NAME_N    str     [n_signals]  signal names
-      GROUP_NAME_UNI  str     [n_signals]  units
-
-  Type B groups additionally contain:
-      GROUP_NAME_ERR  float64 [n_signals, max(n_samples)]  signal errors
-      GROUP_NAME_SQI  float64 [n_signals]  signal quality metric
-      GROUP_NAME_TLS  float64 [n_signals]  max error gap (seconds)
+Dataset names are configured per group via HDF5Schema.GROUP_DS_NAMES.
 
 Batch types:
-  Type A – only base datasets (no _ERR, _SQI, _TLS)
-  Type B – base datasets + _ERR, _SQI, _TLS
-
-Both types have _SAM (valid sample count per signal).
+  Type A – no ERROR key in config → base datasets only
+  Type B – ERROR key present → base + error/quality datasets
 
 Time construction (both types):
   time = TIM[idx] + arange(length) * (1000.0 / FRE[idx])
   where TIM is epoch time in milliseconds and FRE is in Hz.
-
-Dataset names are built as: group_name + suffix (e.g. "GROUP_T0_V").
 """
 
 import threading
@@ -55,9 +39,8 @@ class MockHDF5File:
     Mock HDF5 file class that mimics h5py.File using numpy arrays.
     Useful for testing without h5py dependency.
 
-    GROUP_T0 is Type A (no _ERR/_SQI/_TLS datasets).
-    GROUP_T1 is Type B (has _ERR/_SQI/_TLS datasets).
-    Both groups have _SAM.
+    Groups and dataset names are driven entirely by HDF5Schema.GROUP_DS_NAMES.
+    Groups with an ERROR key are populated as Type B; others as Type A.
     """
 
     def __init__(self, file_path: str, mode: str = "r"):
@@ -77,40 +60,36 @@ class MockHDF5File:
 
         names = np.array(["position", "velocity", "current", "voltage"], dtype=object)
         units = np.array(["m", "m/s", "A", "V"], dtype=object)
-        # Epoch time in ms (all same starting epoch)
         epoch_ms = np.array([1700000000000.0] * num_signals, dtype=np.float64)
         samp_freqs = np.array([100.0, 200.0, 100.0, 500.0], dtype=np.float64)
         nsample = np.array([800, 600, 900, 750], dtype=np.int64)
 
-        for group_name in S.GROUP_NAMES:
+        for group_name, ds_map in S.GROUP_DS_NAMES.items():
             values = rng.randn(num_signals, max_samples).astype(np.float64)
             datasets = {
-                S.ds(group_name, S.VALUE_SUFFIX): values,
-                S.ds(group_name, S.TIME_SUFFIX): epoch_ms.copy(),
-                S.ds(group_name, S.SAMPLING_FREQ_SUFFIX): samp_freqs.copy(),
-                S.ds(group_name, S.NSAMPLE_SUFFIX): nsample.copy(),
-                S.ds(group_name, S.NAMES_SUFFIX): names.copy(),
-                S.ds(group_name, S.UNITS_SUFFIX): units.copy(),
+                ds_map['VALUE']:         values,
+                ds_map['TIME']:          epoch_ms.copy(),
+                ds_map['SAMPLING_FREQ']: samp_freqs.copy(),
+                ds_map['NSAMPLE']:       nsample.copy(),
+                ds_map['NAMES']:         names.copy(),
+                ds_map['UNITS']:         units.copy(),
             }
-            # Second group onward is Type B (add _ERR, _SQI, _TLS)
-            if group_name != S.GROUP_NAMES[0]:
-                errors = rng.randn(num_signals, max_samples).astype(np.float64) * 0.1
-                sqi = rng.uniform(0.8, 1.0, size=num_signals).astype(np.float64)
-                tls = rng.uniform(0.0, 5.0, size=num_signals).astype(np.float64)
-                datasets[S.ds(group_name, S.ERROR_SUFFIX)] = errors
-                datasets[S.ds(group_name, S.SQI_SUFFIX)] = sqi
-                datasets[S.ds(group_name, S.TLS_SUFFIX)] = tls
+            # Type B: add ERROR, SQI, TLS if configured
+            if 'ERROR' in ds_map:
+                datasets[ds_map['ERROR']] = rng.randn(num_signals, max_samples).astype(np.float64) * 0.1
+            if 'SQI' in ds_map:
+                datasets[ds_map['SQI']] = rng.uniform(0.8, 1.0, size=num_signals).astype(np.float64)
+            if 'TLS' in ds_map:
+                datasets[ds_map['TLS']] = rng.uniform(0.0, 5.0, size=num_signals).astype(np.float64)
 
             self._groups[group_name] = datasets
 
     def keys(self) -> List[str]:
-        """Get group names."""
         if self._closed:
             raise ValueError("I/O operation on closed file")
         return list(self._groups.keys())
 
     def __getitem__(self, key: str) -> "MockHDF5Group":
-        """Get a group by name."""
         if self._closed:
             raise ValueError("I/O operation on closed file")
         if key not in self._groups:
@@ -118,7 +97,6 @@ class MockHDF5File:
         return MockHDF5Group(self._groups[key])
 
     def __contains__(self, key: str) -> bool:
-        """Check if group exists."""
         if self._closed:
             raise ValueError("I/O operation on closed file")
         return key in self._groups
@@ -159,9 +137,8 @@ def create_test_file(file_path: str) -> None:
     """
     Create a test HDF5 file with sample data using the configured schema.
 
-    GROUP_T0 is created as Type A (no _ERR/_SQI/_TLS).
-    GROUP_T1 is created as Type B (with _ERR/_SQI/_TLS).
-    Both groups have _SAM.
+    Groups with an ERROR key in GROUP_DS_NAMES are created as Type B;
+    others as Type A.
 
     Args:
         file_path: Path where test file should be created
@@ -181,23 +158,24 @@ def create_test_file(file_path: str) -> None:
     if HAS_H5PY:
         try:
             with h5py.File(file_path, "w") as f:
-                for group_name in S.GROUP_NAMES:
+                for group_name, ds_map in S.GROUP_DS_NAMES.items():
                     grp = f.create_group(group_name)
                     values = rng.randn(num_signals, max_samples).astype(np.float64)
-                    grp.create_dataset(S.ds(group_name, S.VALUE_SUFFIX), data=values)
-                    grp.create_dataset(S.ds(group_name, S.TIME_SUFFIX), data=epoch_ms)
-                    grp.create_dataset(S.ds(group_name, S.SAMPLING_FREQ_SUFFIX), data=samp_freqs)
-                    grp.create_dataset(S.ds(group_name, S.NSAMPLE_SUFFIX), data=nsample)
-                    grp.create_dataset(S.ds(group_name, S.NAMES_SUFFIX), data=names)
-                    grp.create_dataset(S.ds(group_name, S.UNITS_SUFFIX), data=units)
-                    # Type B (second group onward): add _ERR, _SQI, _TLS
-                    if group_name != S.GROUP_NAMES[0]:
+                    grp.create_dataset(ds_map['VALUE'], data=values)
+                    grp.create_dataset(ds_map['TIME'], data=epoch_ms)
+                    grp.create_dataset(ds_map['SAMPLING_FREQ'], data=samp_freqs)
+                    grp.create_dataset(ds_map['NSAMPLE'], data=nsample)
+                    grp.create_dataset(ds_map['NAMES'], data=names)
+                    grp.create_dataset(ds_map['UNITS'], data=units)
+                    if 'ERROR' in ds_map:
                         errors = rng.randn(num_signals, max_samples).astype(np.float64) * 0.1
+                        grp.create_dataset(ds_map['ERROR'], data=errors)
+                    if 'SQI' in ds_map:
                         sqi = rng.uniform(0.8, 1.0, size=num_signals).astype(np.float64)
+                        grp.create_dataset(ds_map['SQI'], data=sqi)
+                    if 'TLS' in ds_map:
                         tls = rng.uniform(0.0, 5.0, size=num_signals).astype(np.float64)
-                        grp.create_dataset(S.ds(group_name, S.ERROR_SUFFIX), data=errors)
-                        grp.create_dataset(S.ds(group_name, S.SQI_SUFFIX), data=sqi)
-                        grp.create_dataset(S.ds(group_name, S.TLS_SUFFIX), data=tls)
+                        grp.create_dataset(ds_map['TLS'], data=tls)
         except Exception as e:
             raise IOError(f"Failed to create HDF5 test file at {file_path}: {e}") from e
     else:
@@ -213,30 +191,25 @@ class HDF5Reader:
     """
     Robust HDF5 file reader with lazy loading and metadata caching.
 
-    Reads only the groups listed in HDF5Schema.GROUP_NAMES.
-    Dataset names are built from group_name + suffix.
+    Reads only the groups listed in HDF5Schema.GROUP_DS_NAMES.
+    Dataset names are resolved per group via the config mapping.
 
     Supports two batch types:
-      Type A – no _ERR dataset → base datasets only
-      Type B – _ERR dataset present → base + error/quality datasets
-    Both types have _SAM (valid sample count per signal).
+      Type A – no ERROR key → base datasets only
+      Type B – ERROR key present → base + error/quality datasets
     """
 
     def __init__(self, file_path: str):
         self.file_path = Path(file_path)
-
         if not self.file_path.exists():
             raise FileNotFoundError(f"HDF5 file not found: {file_path}")
-
         self._lock = threading.Lock()
         self._file_handle = None
         self._groups_cache: Optional[List[str]] = None
         self._metadata_cache: Dict[str, Dict] = {}
-
         self._validate_file()
 
     def _validate_file(self) -> None:
-        """Validate that file is a readable HDF5 file."""
         try:
             with self._open_file() as f:
                 if len(f.keys()) == 0:
@@ -247,31 +220,20 @@ class HDF5Reader:
     def _open_file(self):
         if HAS_H5PY:
             return h5py.File(self.file_path, "r")
-        else:
-            return MockHDF5File(str(self.file_path), "r")
+        return MockHDF5File(str(self.file_path), "r")
 
     # ------------------------------------------------------------------
     # Group discovery
     # ------------------------------------------------------------------
 
     def get_groups(self) -> List[str]:
-        """
-        Get list of configured group names that exist in the file.
-
-        Returns only groups from HDF5Schema.GROUP_NAMES that are
-        actually present in the HDF5 file.
-
-        Returns:
-            Sorted list of group names
-        """
+        """Return configured group names that exist in the file."""
         if self._groups_cache is not None:
             return self._groups_cache
-
         with self._lock:
             with self._open_file() as f:
                 file_keys = list(f.keys())
-                self._groups_cache = [g for g in S.GROUP_NAMES if g in file_keys]
-
+                self._groups_cache = [g for g in S.group_names() if g in file_keys]
         return self._groups_cache
 
     # Backward-compatible alias
@@ -285,84 +247,68 @@ class HDF5Reader:
         """
         Get metadata for a group without loading signal data.
 
-        Args:
-            group_name: Name of the HDF5 group
-
         Returns:
-            Dictionary with:
-              - signal_count: int
-              - sample_count: int  (max column width of value matrix)
-              - signal_names: List[str]
-              - units: List[str]
-              - batch_type: str  ("A" or "B")
-              - n_samples: List[int]  (per-signal valid counts)
-              For Type B additionally:
-              - sqi: List[float]  (signal quality index)
-              - tls: List[float]  (max error gap in seconds)
-
-        Raises:
-            ValueError: If group does not exist or is missing required datasets
+            Dictionary with signal_count, sample_count, signal_names, units,
+            batch_type ("A" or "B"), n_samples, and for Type B: sqi, tls.
         """
         if group_name in self._metadata_cache:
             return self._metadata_cache[group_name]
 
-        ds_values = S.ds(group_name, S.VALUE_SUFFIX)
-        ds_names = S.ds(group_name, S.NAMES_SUFFIX)
-        ds_units = S.ds(group_name, S.UNITS_SUFFIX)
-        ds_nsample = S.ds(group_name, S.NSAMPLE_SUFFIX)
-        ds_err = S.ds(group_name, S.ERROR_SUFFIX)
-        ds_sqi = S.ds(group_name, S.SQI_SUFFIX)
-        ds_tls = S.ds(group_name, S.TLS_SUFFIX)
+        if group_name not in S.GROUP_DS_NAMES:
+            raise ValueError(f"Group '{group_name}' not in schema config")
+
+        ds_map = S.GROUP_DS_NAMES[group_name]
 
         with self._lock:
             with self._open_file() as f:
                 if group_name not in f:
-                    raise ValueError(f"Group '{group_name}' not found")
+                    raise ValueError(f"Group '{group_name}' not found in file")
 
                 group = f[group_name]
 
-                if ds_values not in group or ds_names not in group:
+                if ds_map['VALUE'] not in group or ds_map['NAMES'] not in group:
                     raise ValueError(
                         f"Group '{group_name}' missing required datasets "
-                        f"(expected '{ds_values}' and '{ds_names}')"
+                        f"(expected '{ds_map['VALUE']}' and '{ds_map['NAMES']}')"
                     )
 
-                signal_count = group[ds_values].shape[0]
-                sample_count = group[ds_values].shape[1]
+                signal_count = group[ds_map['VALUE']].shape[0]
+                sample_count = group[ds_map['VALUE']].shape[1]
 
                 signal_names = [
                     n.decode("utf-8") if isinstance(n, bytes) else str(n)
-                    for n in group[ds_names][:]
+                    for n in group[ds_map['NAMES']][:]
                 ]
-                units = [
+
+                ds_units = ds_map['UNITS']
+                units_list = [
                     u.decode("utf-8") if isinstance(u, bytes) else str(u)
                     for u in group[ds_units][:]
                 ] if ds_units in group else [""] * signal_count
 
-                # Both types have _SAM
+                ds_nsample = ds_map['NSAMPLE']
                 if ds_nsample in group:
                     n_samples = [int(v) for v in group[ds_nsample][:]]
                 else:
                     n_samples = [sample_count] * signal_count
 
-                # Type B detection: presence of _ERR dataset
-                is_type_b = ds_err in group
+                # Type B detection: ERROR key configured AND present in file
+                is_type_b = 'ERROR' in ds_map and ds_map['ERROR'] in group
 
                 metadata = {
                     "signal_count": signal_count,
                     "sample_count": sample_count,
                     "signal_names": signal_names,
-                    "units": units,
+                    "units": units_list,
                     "batch_type": "B" if is_type_b else "A",
                     "n_samples": n_samples,
                 }
 
-                # Type B extra fields
                 if is_type_b:
-                    if ds_sqi in group:
-                        metadata["sqi"] = [float(v) for v in group[ds_sqi][:]]
-                    if ds_tls in group:
-                        metadata["tls"] = [float(v) for v in group[ds_tls][:]]
+                    if 'SQI' in ds_map and ds_map['SQI'] in group:
+                        metadata["sqi"] = [float(v) for v in group[ds_map['SQI']][:]]
+                    if 'TLS' in ds_map and ds_map['TLS'] in group:
+                        metadata["tls"] = [float(v) for v in group[ds_map['TLS']][:]]
 
                 self._metadata_cache[group_name] = metadata
 
@@ -375,89 +321,41 @@ class HDF5Reader:
     # Signal loading
     # ------------------------------------------------------------------
 
-    def load_signal(
-        self,
-        group_name: str,
-        signal_index: int,
-    ) -> Tuple[np.ndarray, np.ndarray]:
+    def load_signal(self, group_name: str, signal_index: int) -> Tuple[np.ndarray, np.ndarray]:
         """
         Load a single signal with constructed time vector.
 
-        Both Type A and Type B use _SAM for valid sample count:
-            signal = values[idx, :n_samples[idx]]
-
-        Time is always constructed:
-            t0 = TIM[idx]   (epoch ms)
-            fs = FRE[idx]   (Hz)
-            time = t0 + arange(length) * (1000.0 / fs)
-
-        Args:
-            group_name: Name of the HDF5 group
-            signal_index: Index of signal (0-based)
+        time = t0 + arange(n) * (1000.0 / fs)
 
         Returns:
             Tuple of (time_array, signal_values)
-
-        Raises:
-            ValueError: If group or signal index invalid
-            IndexError: If signal index out of range
         """
         metadata = self.get_group_metadata(group_name)
-
         if signal_index < 0 or signal_index >= metadata["signal_count"]:
             raise IndexError(
-                f"Signal index {signal_index} out of range "
-                f"[0, {metadata['signal_count']})"
+                f"Signal index {signal_index} out of range [0, {metadata['signal_count']})"
             )
 
-        ds_values = S.ds(group_name, S.VALUE_SUFFIX)
-        ds_time = S.ds(group_name, S.TIME_SUFFIX)
-        ds_fs = S.ds(group_name, S.SAMPLING_FREQ_SUFFIX)
-
-        # Get valid sample count from metadata (already read from _SAM)
+        ds_map = S.GROUP_DS_NAMES[group_name]
         n = metadata["n_samples"][signal_index]
 
         with self._lock:
             with self._open_file() as f:
                 group = f[group_name]
+                signal_data = group[ds_map['VALUE']][signal_index, :n].astype(np.float64)
+                t0 = float(group[ds_map['TIME']][signal_index])
+                fs = float(group[ds_map['SAMPLING_FREQ']][signal_index])
 
-                # Read signal values (only valid portion)
-                signal_data = group[ds_values][signal_index, :n].astype(np.float64)
-
-                # Read per-signal time parameters
-                t0 = float(group[ds_time][signal_index])
-                fs = float(group[ds_fs][signal_index])
-
-        # Construct time vector (t0 is epoch ms, fs is Hz → step = 1000/fs ms)
         time_data = t0 + np.arange(n, dtype=np.float64) * (1000.0 / fs)
-
         return time_data, signal_data
 
-    def load_signal_by_name(
-        self, group_name: str, signal_name: str
-    ) -> Tuple[np.ndarray, np.ndarray]:
-        """
-        Load signal by name instead of index.
-
-        Args:
-            group_name: Name of the HDF5 group
-            signal_name: Name of the signal
-
-        Returns:
-            Tuple of (time_array, signal_values)
-
-        Raises:
-            ValueError: If signal name not found
-        """
+    def load_signal_by_name(self, group_name: str, signal_name: str) -> Tuple[np.ndarray, np.ndarray]:
+        """Load signal by name instead of index."""
         metadata = self.get_group_metadata(group_name)
-
         try:
             signal_index = metadata["signal_names"].index(signal_name)
         except ValueError as e:
-            raise ValueError(
-                f"Signal '{signal_name}' not found in group '{group_name}'"
-            ) from e
-
+            raise ValueError(f"Signal '{signal_name}' not found in group '{group_name}'") from e
         return self.load_signal(group_name, signal_index)
 
     # ------------------------------------------------------------------
@@ -465,30 +363,17 @@ class HDF5Reader:
     # ------------------------------------------------------------------
 
     def get_signal_stats(self, group_name: str, signal_index: int) -> Dict:
-        """
-        Get statistical summary of a signal (respects n_sample truncation).
-
-        Args:
-            group_name: Name of the HDF5 group
-            signal_index: Index of signal
-
-        Returns:
-            Dictionary with mean, std, min, max, median, samples
-        """
+        """Get statistical summary of a signal (respects n_sample truncation)."""
         metadata = self.get_group_metadata(group_name)
-
         if signal_index < 0 or signal_index >= metadata["signal_count"]:
             raise IndexError(f"Signal index {signal_index} out of range")
 
-        ds_values = S.ds(group_name, S.VALUE_SUFFIX)
-
-        # Get valid sample count from metadata
+        ds_map = S.GROUP_DS_NAMES[group_name]
         n = metadata["n_samples"][signal_index]
 
         with self._lock:
             with self._open_file() as f:
-                group = f[group_name]
-                signal_data = group[ds_values][signal_index, :n]
+                signal_data = f[group_name][ds_map['VALUE']][signal_index, :n]
 
         return {
             "mean": float(np.mean(signal_data)),
@@ -504,7 +389,6 @@ class HDF5Reader:
     # ------------------------------------------------------------------
 
     def close(self) -> None:
-        """Close the file handle and cleanup resources."""
         with self._lock:
             if self._file_handle is not None:
                 try:

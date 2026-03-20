@@ -21,7 +21,7 @@ Creates a folder structure matching the expected layout:
             └── cycle_1/
                 └── ...
 
-Each HDF5 file contains groups from HDF5Schema.GROUP_NAMES.
+Each HDF5 file contains groups from HDF5Schema.GROUP_DS_NAMES.
   GROUP_T0 = Type A  (no _ERR/_SQI/_TLS)
   GROUP_T1 = Type B  (has _ERR/_SQI/_TLS)
 
@@ -317,12 +317,13 @@ def generate_type_a_group(
         values[i, :n] = gen_fn(t, rng)
         # Remaining columns stay 0 (padding)
 
-    grp.create_dataset(S.ds(group_name, S.VALUE_SUFFIX), data=values, compression="gzip")
-    grp.create_dataset(S.ds(group_name, S.TIME_SUFFIX), data=epoch_times)
-    grp.create_dataset(S.ds(group_name, S.SAMPLING_FREQ_SUFFIX), data=freqs)
-    grp.create_dataset(S.ds(group_name, S.NSAMPLE_SUFFIX), data=n_samples)
-    grp.create_dataset(S.ds(group_name, S.NAMES_SUFFIX), data=np.array(names, dtype="S64"))
-    grp.create_dataset(S.ds(group_name, S.UNITS_SUFFIX), data=np.array(units, dtype="S32"))
+    ds = S.GROUP_DS_NAMES[group_name]
+    grp.create_dataset(ds['VALUE'], data=values, compression="gzip")
+    grp.create_dataset(ds['TIME'], data=epoch_times)
+    grp.create_dataset(ds['SAMPLING_FREQ'], data=freqs)
+    grp.create_dataset(ds['NSAMPLE'], data=n_samples)
+    grp.create_dataset(ds['NAMES'], data=np.array(names, dtype="S64"))
+    grp.create_dataset(ds['UNITS'], data=np.array(units, dtype="S32"))
 
 
 def generate_type_b_group(
@@ -365,17 +366,18 @@ def generate_type_b_group(
     tls = rng.uniform(0.0, 5.0, size=num_signals).astype(np.float64)
 
     # Base datasets (same as Type A)
-    grp.create_dataset(S.ds(group_name, S.VALUE_SUFFIX), data=values, compression="gzip")
-    grp.create_dataset(S.ds(group_name, S.TIME_SUFFIX), data=epoch_times)
-    grp.create_dataset(S.ds(group_name, S.SAMPLING_FREQ_SUFFIX), data=freqs)
-    grp.create_dataset(S.ds(group_name, S.NSAMPLE_SUFFIX), data=n_samples)
-    grp.create_dataset(S.ds(group_name, S.NAMES_SUFFIX), data=np.array(names, dtype="S64"))
-    grp.create_dataset(S.ds(group_name, S.UNITS_SUFFIX), data=np.array(units, dtype="S32"))
+    ds = S.GROUP_DS_NAMES[group_name]
+    grp.create_dataset(ds['VALUE'], data=values, compression="gzip")
+    grp.create_dataset(ds['TIME'], data=epoch_times)
+    grp.create_dataset(ds['SAMPLING_FREQ'], data=freqs)
+    grp.create_dataset(ds['NSAMPLE'], data=n_samples)
+    grp.create_dataset(ds['NAMES'], data=np.array(names, dtype="S64"))
+    grp.create_dataset(ds['UNITS'], data=np.array(units, dtype="S32"))
 
     # Type B additional datasets
-    grp.create_dataset(S.ds(group_name, S.ERROR_SUFFIX), data=errors, compression="gzip")
-    grp.create_dataset(S.ds(group_name, S.SQI_SUFFIX), data=sqi)
-    grp.create_dataset(S.ds(group_name, S.TLS_SUFFIX), data=tls)
+    grp.create_dataset(ds['ERROR'], data=errors, compression="gzip")
+    grp.create_dataset(ds['SQI'], data=sqi)
+    grp.create_dataset(ds['TLS'], data=tls)
 
 
 def generate_all(data_root: Path, seed: int = 42) -> None:
@@ -400,18 +402,16 @@ def generate_all(data_root: Path, seed: int = 42) -> None:
             print(f"    {folder2}/{filename}  (generating...)", end="", flush=True)
 
             with h5py.File(filepath, "w") as f:
-                for i, group_name in enumerate(S.GROUP_NAMES):
+                for group_name in S.group_names():
                     grp = f.create_group(group_name)
-                    if i == 0:
-                        # First group → Type A
-                        generate_type_a_group(grp, group_name, rng)
-                    else:
-                        # Other groups → Type B
+                    if S.has_ds(group_name, 'ERROR'):
                         generate_type_b_group(grp, group_name, rng)
+                    else:
+                        generate_type_a_group(grp, group_name, rng)
 
             size_mb = filepath.stat().st_size / (1024 * 1024)
             print(f"\r    {folder2}/{filename}  "
-                  f"({len(S.GROUP_NAMES)} groups, "
+                  f"({len(S.group_names())} groups, "
                   f"{NUM_SIGNALS} signals, {MAX_SAMPLES} max_samples, "
                   f"{size_mb:.1f} MB)")
             total_files += 1

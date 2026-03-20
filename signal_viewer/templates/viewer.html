@@ -35,11 +35,11 @@
 // VIEWER MODULE — ADAPTIVE ZOOM  (v3 – linear axis, zero timezone ambiguity)
 // ============================================================================
 
-const MAX_SIGNALS = BrowserCaps.maxSignals;
+const MAX_SIGNALS = 5;
 const OVERLAY_HEIGHT = 520;
 const SUBPLOT_HEIGHT_PER = 300;
-const ZOOM_DOWNSAMPLE = BrowserCaps.downsampleTarget;   // points per zoom request
-const ZOOM_DEBOUNCE_MS = BrowserCaps.isLegacyFirefox ? 300 : 150;  // longer debounce on slow browsers
+const ZOOM_DOWNSAMPLE = 5000;          // points per zoom request
+const ZOOM_DEBOUNCE_MS = 150;          // debounce zoom re-fetches
 
 let plotMode = 'overlay';
 
@@ -132,9 +132,8 @@ function safeMax(arr) {
  *  Prevents the browser from allocating multi-GB WebGL buffers that crash
  *  the renderer process.  The server already downsamples, so hitting this
  *  cap indicates a bug or misconfiguration.
- *  Lower on legacy Firefox to prevent SVG DOM explosion / OOM.
  */
-const CLIENT_MAX_POINTS = BrowserCaps.maxPoints;
+const CLIENT_MAX_POINTS = 500000;
 
 /**
  * Build custom tick labels for a linear x-axis that displays epoch ms as
@@ -402,7 +401,7 @@ function plotOverlay(el) {
   const traces = signals.map(sig => ({
     x: sig.timeRaw, y: sig.values,
     name: legendLabel(sig),
-    type: BrowserCaps.scatterType, mode: 'lines',
+    type: 'scattergl', mode: 'lines',
     line: { color: sig.color, width: 1.5 },
     hoverinfo: 'none'
   }));
@@ -507,7 +506,7 @@ function plotSubplots(el) {
     traces.push({
       x: sig.timeRaw, y: sig.values,
       name: legendLabel(sig),
-      type: BrowserCaps.scatterType, mode: 'lines',
+      type: 'scattergl', mode: 'lines',
       line: { color: sig.color, width: 1.5 },
       hoverinfo: 'none',
       xaxis: i === 0 ? 'x' : `x${i + 1}`,
@@ -806,7 +805,7 @@ function _reactPlot(tMin, tMax) {
     traces = signals.map((sig, i) => ({
       x: sig.timeRaw, y: sig.values,
       name: legendLabel(sig),
-      type: BrowserCaps.scatterType, mode: 'lines',
+      type: 'scattergl', mode: 'lines',
       line: { color: sig.color, width: 1.5 },
       hoverinfo: 'none'
     }));
@@ -881,7 +880,7 @@ function _reactPlot(tMin, tMax) {
       traces.push({
         x: sig.timeRaw, y: sig.values,
         name: legendLabel(sig),
-        type: BrowserCaps.scatterType, mode: 'lines',
+        type: 'scattergl', mode: 'lines',
         line: { color: sig.color, width: 1.5 },
         hoverinfo: 'none',
         xaxis: i === 0 ? 'x' : `x${i + 1}`,
