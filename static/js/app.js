@@ -4,7 +4,7 @@
  * Provides:
  *   - API helpers (apiFetch, apiPost)
  *   - Path encoding (base64url)
- *   - GlobalNav: serial → step → file cascade + sidebar batch/signal tree
+ *   - GlobalNav: root → serial → step → file cascade + sidebar batch/signal tree
  *   - URL state persistence via sessionStorage
  *   - Loading overlay & toast notifications
  *   - Shared constants (SIGNAL_COLORS, formatNumber, etc.)
@@ -297,6 +297,7 @@ function getSignalColor(index) {
 const URLState = {
   save() {
     sessionStorage.setItem('globalNavState', JSON.stringify({
+      root: GlobalNav.root,
       serial: GlobalNav.serial,
       step: GlobalNav.step,
       filePath: GlobalNav.filePath,
@@ -316,6 +317,7 @@ const URLState = {
 
 const GlobalNav = {
   // Current state
+  root: null,
   serial: null,
   step: null,
   filePath: null,
@@ -325,15 +327,17 @@ const GlobalNav = {
   // Page callbacks (set by each page's script)
   onSidebarSignalClick: null,   // (batch, idx, name, units)
   onFileSelected: null,         // ()
-  onSelectionChange: null,      // () — called when serial/step/file changes
+  onSelectionChange: null,      // () — called when root/serial/step/file changes
 
   // Internal
   _ready: null,
-  _serials: [],
+  _roots: [],
+  _serials: {},
   _steps: {},
   _files: {},
 
   // DOM references (set in init)
+  _rootEl: null,
   _serialEl: null,
   _stepEl: null,
   _fileEl: null,
@@ -342,12 +346,13 @@ const GlobalNav = {
   // ── Initialisation ──────────────────────────────────────────────────────
 
   async init() {
+    this._rootEl    = document.getElementById('globalRoot');
     this._serialEl  = document.getElementById('globalSerial');
     this._stepEl    = document.getElementById('globalStep');
     this._fileEl    = document.getElementById('globalFile');
     this._sidebarEl = document.getElementById('sidebarContent');
 
-    if (!this._serialEl || !this._stepEl || !this._fileEl) {
+    if (!this._rootEl || !this._serialEl || !this._stepEl || !this._fileEl) {
       // Page without file selector (e.g. docs)
       return;
     }
@@ -356,17 +361,28 @@ const GlobalNav = {
       // Keep loading overlay visible for the ENTIRE init + restore cycle
       showLoading('Restoring session\u2026');
 
-      const data = await apiFetch('/api/serials');
-      this._serials = data.serials || [];
+      // Fetch available roots
+      const rootData = await apiFetch('/api/roots');
+      this._roots = rootData.roots || [];
 
-      this._serialEl.innerHTML = '<option value="">Select serial\u2026</option>';
-      this._serials.forEach(s => {
+      this._rootEl.innerHTML = '<option value="">Select root\u2026</option>';
+      this._roots.forEach(r => {
         const o = document.createElement('option');
-        o.value = s; o.textContent = s;
-        this._serialEl.appendChild(o);
+        o.value = r; o.textContent = r;
+        this._rootEl.appendChild(o);
       });
 
-      // Restore file-selector state (serial/step/file dropdowns + sidebar)
+      // Auto-select if only one root
+      if (this._roots.length === 1) {
+        this.root = this._roots[0];
+        this._rootEl.value = this._roots[0];
+        // Pre-load serials for the single root
+        const data = await apiFetch(`/api/roots/${encodeURIComponent(this.root)}/serials`);
+        this._serials[this.root] = data.serials || [];
+        this._populateSelect(this._serialEl, this._serials[this.root], 'Select serial\u2026');
+      }
+
+      // Restore file-selector state (root/serial/step/file dropdowns + sidebar)
       // Pages call their own restorePageState() after this promise resolves
       const saved = URLState.load();
       if (saved) await this._restoreState(saved);
@@ -381,14 +397,27 @@ const GlobalNav = {
   // ── State restoration ───────────────────────────────────────────────────
 
   async _restoreState(saved) {
-    if (!saved.serial || !this._serials.includes(saved.serial)) return;
+    // Restore root
+    if (!saved.root || !this._roots.includes(saved.root)) return;
+
+    this.root = saved.root;
+    this._rootEl.value = saved.root;
+
+    // Load serials for this root (if not already loaded during auto-select)
+    if (!this._serials[saved.root]) {
+      const data = await apiFetch(`/api/roots/${encodeURIComponent(saved.root)}/serials`);
+      this._serials[saved.root] = data.serials || [];
+      this._populateSelect(this._serialEl, this._serials[saved.root], 'Select serial\u2026');
+    }
+
+    if (!saved.serial || !this._serials[saved.root].includes(saved.serial)) return;
 
     this.serial = saved.serial;
     this._serialEl.value = saved.serial;
 
     // Load steps
     const stepsData = await apiFetch(
-      `/api/serials/${encodeURIComponent(saved.serial)}/steps`
+      `/api/roots/${encodeURIComponent(this.root)}/serials/${encodeURIComponent(saved.serial)}/steps`
     );
     this._steps[saved.serial] = stepsData.steps || [];
     this._populateSelect(this._stepEl, this._steps[saved.serial], 'Select step\u2026');
@@ -404,7 +433,7 @@ const GlobalNav = {
 
     // Load files — use this.step (normalized string) for both URL and cache key
     const filesData = await apiFetch(
-      `/api/serials/${encodeURIComponent(saved.serial)}/steps/${encodeURIComponent(this.step)}/files`
+      `/api/roots/${encodeURIComponent(this.root)}/serials/${encodeURIComponent(saved.serial)}/steps/${encodeURIComponent(this.step)}/files`
     );
     this._files[this.step] = filesData.files || [];
     this._populateFileSelect(this._files[this.step]);
@@ -441,6 +470,30 @@ const GlobalNav = {
 
   // ── Dropdown handlers (called from inline onchange in base.html) ──────
 
+  async onRootChange() {
+    this.root = this._rootEl.value;
+    this._resetFrom('serial');
+    this._clearAllPageState();
+    if (this.onSelectionChange) this.onSelectionChange();
+    if (!this.root) { URLState.save(); return; }
+
+    try {
+      showLoading('Loading serials\u2026');
+      const data = await apiFetch(
+        `/api/roots/${encodeURIComponent(this.root)}/serials`
+      );
+      this._serials[this.root] = data.serials || [];
+      hideLoading();
+
+      this._populateSelect(this._serialEl, this._serials[this.root], 'Select serial\u2026');
+      this._serialEl.disabled = false;
+      URLState.save();
+    } catch (err) {
+      hideLoading();
+      showToast(`Failed to load serials: ${err.message}`, 'error');
+    }
+  },
+
   async onSerialChange() {
     this.serial = this._serialEl.value;
     this._resetFrom('step');
@@ -451,7 +504,7 @@ const GlobalNav = {
     try {
       showLoading('Loading steps\u2026');
       const data = await apiFetch(
-        `/api/serials/${encodeURIComponent(this.serial)}/steps`
+        `/api/roots/${encodeURIComponent(this.root)}/serials/${encodeURIComponent(this.serial)}/steps`
       );
       this._steps[this.serial] = data.steps || [];
       hideLoading();
@@ -475,7 +528,7 @@ const GlobalNav = {
     try {
       showLoading('Loading files\u2026');
       const data = await apiFetch(
-        `/api/serials/${encodeURIComponent(this.serial)}/steps/${encodeURIComponent(this.step)}/files`
+        `/api/roots/${encodeURIComponent(this.root)}/serials/${encodeURIComponent(this.serial)}/steps/${encodeURIComponent(this.step)}/files`
       );
       this._files[this.step] = data.files || [];
       hideLoading();
@@ -687,13 +740,19 @@ const GlobalNav = {
   },
 
   _resetFrom(level) {
-    if (level === 'step') {
+    if (level === 'serial') {
+      this.serial = null;
+      this._serialEl.value = '';
+      this._serialEl.innerHTML = '<option value="">Select serial\u2026</option>';
+      this._serialEl.disabled = true;
+    }
+    if (level === 'serial' || level === 'step') {
       this.step = null;
       this._stepEl.value = '';
       this._stepEl.innerHTML = '<option value="">Select step\u2026</option>';
       this._stepEl.disabled = true;
     }
-    // Always reset file when resetting step or file
+    // Always reset file when resetting serial, step or file
     this.filePath = null;
     this.fileName = null;
     this.fileSize = null;

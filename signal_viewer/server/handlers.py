@@ -110,9 +110,31 @@ class BaseHandler(tornado.web.RequestHandler):
 
         self.write_json({"error": error_message, "status": status_code})
 
+    def get_metadata_index(self, root_label: str):
+        """
+        Look up the MetadataIndex for a given root label.
+
+        Args:
+            root_label: URL-decoded root label (key in DATA_ROOTS)
+
+        Returns:
+            MetadataIndex instance
+
+        Raises:
+            tornado.web.HTTPError: 404 if root label not found, 503 if index not initialised
+        """
+        indices = getattr(self.application, 'metadata_indices', {})
+        if root_label not in indices:
+            raise tornado.web.HTTPError(404, f"Root not found: {root_label}")
+        idx = indices[root_label]
+        if idx is None:
+            raise tornado.web.HTTPError(503, "Index not initialized for this root")
+        return idx
+
     def decode_file_path(self, encoded_path: str) -> str:
         """
-        Decode base64-encoded file path from URL and validate it stays within DATA_ROOT.
+        Decode base64-encoded file path from URL and validate it stays within
+        any configured DATA_ROOT.
 
         Args:
             encoded_path: Base64-encoded file path
@@ -121,7 +143,7 @@ class BaseHandler(tornado.web.RequestHandler):
             Decoded file path
 
         Raises:
-            ValueError: If decoding fails or path is outside DATA_ROOT
+            ValueError: If decoding fails or path is outside all data roots
         """
         try:
             # Re-add padding stripped by JS encodePath
@@ -129,13 +151,14 @@ class BaseHandler(tornado.web.RequestHandler):
             decoded = base64.urlsafe_b64decode(padded)
             path = decoded.decode("utf-8")
 
-            # Validate path stays within DATA_ROOT
+            # Validate path stays within ANY configured data root
             resolved = Path(path).resolve()
-            data_root = Path(config.DATA_ROOT).resolve()
-            if not str(resolved).startswith(str(data_root) + "/") and resolved != data_root:
-                raise ValueError("Path outside data root")
+            for root_path in config.DATA_ROOTS.values():
+                data_root = Path(root_path).resolve()
+                if str(resolved).startswith(str(data_root) + "/") or resolved == data_root:
+                    return path
 
-            return path
+            raise ValueError("Path outside data root")
         except Exception as e:
             raise ValueError(f"Failed to decode file path: {e}")
 
@@ -207,18 +230,33 @@ class PageHandler(BaseHandler):
             self.write_json({"error": f"Template error: {e}"})
 
 
-class SerialsHandler(BaseHandler):
-    """GET /api/serials → List all serial numbers."""
+class RootsHandler(BaseHandler):
+    """GET /api/roots → List configured data root labels."""
 
     def get(self):
-        """Return list of serial numbers."""
+        """Return list of root labels (keys from DATA_ROOTS)."""
         try:
-            if self.application.metadata_index is None:
-                self.write_json({"serials": [], "error": "Index not initialized"})
-                return
+            roots = list(getattr(self.application, 'metadata_indices', {}).keys())
+            self.write_json({"roots": roots})
+        except Exception as e:
+            if config.VERBOSE:
+                logger.error(f"Error in RootsHandler: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in RootsHandler: {e}")
+            raise tornado.web.HTTPError(500, str(e))
 
-            serials = self.application.metadata_index.get_serial_numbers()
+
+class SerialsHandler(BaseHandler):
+    """GET /api/roots/{root}/serials → List serial numbers for a root."""
+
+    def get(self, root_label: str):
+        """Return list of serial numbers for the given root."""
+        try:
+            idx = self.get_metadata_index(root_label)
+            serials = idx.get_serial_numbers()
             self.write_json({"serials": serials})
+        except tornado.web.HTTPError:
+            raise
         except Exception as e:
             if config.VERBOSE:
                 logger.error(f"Error in SerialsHandler: {e}\n{traceback.format_exc()}")
@@ -228,21 +266,22 @@ class SerialsHandler(BaseHandler):
 
 
 class StepsHandler(BaseHandler):
-    """GET /api/serials/{serial_num}/steps → List folder_2 names for a folder_1."""
+    """GET /api/roots/{root}/serials/{serial}/steps → List steps for a serial."""
 
-    def get(self, serial_num: str):
+    def get(self, root_label: str, serial_num: str):
         """
-        Get steps (folder_2 names) for a serial number (folder_1).
+        Get steps (folder_1/folder_2 keys) for a serial within a root.
 
         Args:
-            serial_num: folder_1 identifier (e.g., "p001_motor_test")
+            root_label: root label (key in DATA_ROOTS)
+            serial_num: serial identifier (e.g., "SN001")
         """
         try:
-            if self.application.metadata_index is None:
-                raise tornado.web.HTTPError(503, "Index not initialized")
-
-            steps = self.application.metadata_index.get_steps(serial_num)
+            idx = self.get_metadata_index(root_label)
+            steps = idx.get_steps(serial_num)
             self.write_json({"steps": steps})
+        except tornado.web.HTTPError:
+            raise
         except ValueError as e:
             raise tornado.web.HTTPError(404, str(e))
         except Exception as e:
@@ -254,24 +293,23 @@ class StepsHandler(BaseHandler):
 
 
 class FilesHandler(BaseHandler):
-    """GET /api/serials/{serial_num}/steps/{step}/files → List files in a step."""
+    """GET /api/roots/{root}/serials/{serial}/steps/{step}/files → List files."""
 
-    def get(self, serial_num: str, step: str):
+    def get(self, root_label: str, serial_num: str, step: str):
         """
-        Get files for a folder_1 and folder_2.
+        Get files for a serial and step within a root.
 
         Args:
-            serial_num: folder_1 identifier
-            step: folder_2 name (string)
+            root_label: root label (key in DATA_ROOTS)
+            serial_num: serial identifier
+            step: step key (folder_1/folder_2)
         """
         try:
-            if self.application.metadata_index is None:
-                raise tornado.web.HTTPError(503, "Index not initialized")
-
-            files = self.application.metadata_index.get_files(
-                serial_num, step
-            )
+            idx = self.get_metadata_index(root_label)
+            files = idx.get_files(serial_num, step)
             self.write_json({"files": files})
+        except tornado.web.HTTPError:
+            raise
         except ValueError as e:
             raise tornado.web.HTTPError(404, str(e))
         except Exception as e:
@@ -829,28 +867,27 @@ class RescanHandler(BaseHandler):
 
     def post(self):
         """
-        Re-scan the data root directory to detect new or removed files.
+        Re-scan all data root directories to detect new or removed files.
 
         Returns metadata about the rescan operation.
         """
         try:
-            if self.application.metadata_index is None:
-                raise tornado.web.HTTPError(503, "Index not initialized")
+            indices = getattr(self.application, 'metadata_indices', {})
+            if not indices:
+                raise tornado.web.HTTPError(503, "No indices initialized")
 
-            # Re-scan filesystem
-            self.application.metadata_index.rescan()
-
-            # Get updated statistics
-            serials = self.application.metadata_index.get_serial_numbers()
-            total_steps = sum(
-                len(self.application.metadata_index.get_steps(s))
-                for s in serials
-            )
+            total_serials = 0
+            total_steps = 0
+            for idx in indices.values():
+                idx.rescan()
+                serials = idx.get_serial_numbers()
+                total_serials += len(serials)
+                total_steps += sum(len(idx.get_steps(s)) for s in serials)
 
             self.write_json(
                 {
                     "status": "success",
-                    "serial_count": len(serials),
+                    "serial_count": total_serials,
                     "total_steps": total_steps,
                 }
             )

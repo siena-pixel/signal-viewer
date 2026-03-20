@@ -35,6 +35,13 @@ python3 -m signal_viewer.server.app</code></pre>
       <h3>Using your own data</h3>
       <p>Place HDF5 files inside the <code>data/</code> directory following the folder structure described in the Data Format section below. Alternatively, point to an external directory:</p>
       <pre><code>export SIGNAL_VIEWER_DATA_ROOT=/path/to/your/data</code></pre>
+      <p>To configure multiple data root directories, edit the <code>DATA_ROOTS</code> dictionary in <code>signal_viewer/config.py</code>:</p>
+      <pre><code>DATA_ROOTS = {
+    'Default': Path('/path/to/default/data'),
+    'Lab A':   Path('/mnt/lab_a/measurements'),
+    'Lab B':   Path('/mnt/lab_b/measurements'),
+}</code></pre>
+      <p>Each entry appears as a selectable option in the <strong>Root</strong> dropdown. When only one root is configured, it is auto-selected.</p>
     </details>
 
     <details>
@@ -61,16 +68,17 @@ python3 -m signal_viewer.server.app</code></pre>
             <th style="padding:6px 10px;">Role</th>
             <th style="padding:6px 10px;">Dataset name</th>
             <th style="padding:6px 10px;">Shape</th>
-            <th style="padding:6px 10px;">Description</th>
+            <th style="padding:6px 10px;">Required</th>
+            <th style="padding:6px 10px;">Fallback</th>
           </tr>
         </thead>
         <tbody>
-          <tr><td style="padding:4px 10px;"><code>VALUE</code></td><td style="padding:4px 10px;"><code>GROUP_T0_V</code></td><td style="padding:4px 10px;">(M, N) float64</td><td style="padding:4px 10px;">Signal values &mdash; M signals, N samples each</td></tr>
-          <tr><td style="padding:4px 10px;"><code>TIME</code></td><td style="padding:4px 10px;"><code>GROUP_T0_TIM</code></td><td style="padding:4px 10px;">(M,) float64</td><td style="padding:4px 10px;">Start time per signal (epoch milliseconds)</td></tr>
-          <tr><td style="padding:4px 10px;"><code>SAMPLING_FREQ</code></td><td style="padding:4px 10px;"><code>GROUP_T0_FRE</code></td><td style="padding:4px 10px;">(M,) float64</td><td style="padding:4px 10px;">Sampling frequency per signal (Hz)</td></tr>
-          <tr><td style="padding:4px 10px;"><code>NSAMPLE</code></td><td style="padding:4px 10px;"><code>GROUP_T0_SAM</code></td><td style="padding:4px 10px;">(M,) int64</td><td style="padding:4px 10px;">Valid sample count per signal</td></tr>
-          <tr><td style="padding:4px 10px;"><code>NAMES</code></td><td style="padding:4px 10px;"><code>GROUP_T0_N</code></td><td style="padding:4px 10px;">(M,) string</td><td style="padding:4px 10px;">Signal names</td></tr>
-          <tr><td style="padding:4px 10px;"><code>UNITS</code></td><td style="padding:4px 10px;"><code>GROUP_T0_UNI</code></td><td style="padding:4px 10px;">(M,) string</td><td style="padding:4px 10px;">Signal units</td></tr>
+          <tr><td style="padding:4px 10px;"><code>VALUE</code></td><td style="padding:4px 10px;"><code>GROUP_T0_V</code></td><td style="padding:4px 10px;">(M, N) float64</td><td style="padding:4px 10px;"><strong>Yes</strong></td><td style="padding:4px 10px;">&mdash;</td></tr>
+          <tr><td style="padding:4px 10px;"><code>NAMES</code></td><td style="padding:4px 10px;"><code>GROUP_T0_N</code></td><td style="padding:4px 10px;">(M,) string</td><td style="padding:4px 10px;">Recommended</td><td style="padding:4px 10px;">Signal_0, Signal_1, &hellip;</td></tr>
+          <tr><td style="padding:4px 10px;"><code>TIME</code></td><td style="padding:4px 10px;"><code>GROUP_T0_TIM</code></td><td style="padding:4px 10px;">(M,) float64</td><td style="padding:4px 10px;">No</td><td style="padding:4px 10px;">0.0 (epoch ms)</td></tr>
+          <tr><td style="padding:4px 10px;"><code>SAMPLING_FREQ</code></td><td style="padding:4px 10px;"><code>GROUP_T0_FRE</code></td><td style="padding:4px 10px;">(M,) float64</td><td style="padding:4px 10px;">No</td><td style="padding:4px 10px;">Parsed from VALUE name (e.g. <code>_0050</code> &rarr; 50&nbsp;Hz), else 1.0</td></tr>
+          <tr><td style="padding:4px 10px;"><code>NSAMPLE</code></td><td style="padding:4px 10px;"><code>GROUP_T0_SAM</code></td><td style="padding:4px 10px;">(M,) int64</td><td style="padding:4px 10px;">No</td><td style="padding:4px 10px;">Full N from VALUE shape</td></tr>
+          <tr><td style="padding:4px 10px;"><code>UNITS</code></td><td style="padding:4px 10px;"><code>GROUP_T0_UNI</code></td><td style="padding:4px 10px;">(M,) string</td><td style="padding:4px 10px;">No</td><td style="padding:4px 10px;">Empty strings</td></tr>
         </tbody>
       </table>
 
@@ -94,10 +102,11 @@ python3 -m signal_viewer.server.app</code></pre>
       <h3>Signal Types</h3>
       <p>The reader auto-detects the signal type per group based on whether an <code>ERROR</code> dataset is configured and present:</p>
       <ul>
-        <li><strong>Type A</strong> (standard): base datasets only (VALUE, TIME, SAMPLING_FREQ, NSAMPLE, NAMES, UNITS). Signals are truncated to the per-signal valid sample count (NSAMPLE). Time is constructed as <code>TIME[i] + arange(NSAMPLE[i]) &times; (1000 / SAMPLING_FREQ[i])</code> ms.</li>
-        <li><strong>Type B</strong> (extended): base datasets plus ERROR, SQI, and TLS companion datasets. Same truncation and time construction as Type A.</li>
+        <li><strong>Type A</strong> (standard): VALUE is the only required dataset. All other datasets degrade gracefully when absent.</li>
+        <li><strong>Type B</strong> (extended): VALUE plus ERROR, SQI, and TLS companion datasets.</li>
       </ul>
-      <p>Each signal is a row in the VALUE matrix. Signal names and units are read from the NAMES and UNITS datasets. Supported file extension: <code>.h5</code>.</p>
+      <p>Time construction: <code>t0 + arange(n) &times; (1000 / fs)</code> where <code>t0</code> comes from TIME (or 0.0), <code>n</code> from NSAMPLE (or the full sample count from VALUE), and <code>fs</code> from SAMPLING_FREQ (or parsed from the VALUE dataset name suffix, e.g. <code>_0050</code> &rarr; 50&nbsp;Hz, or 1.0&nbsp;Hz).</p>
+      <p>Groups where VALUE is missing or empty (0 signals or 0 samples) are silently ignored. Supported file extension: <code>.h5</code>.</p>
 
       <h3>Customizing the schema</h3>
       <p>To adapt the viewer to your own HDF5 naming convention, edit the <code>GROUP_DS_NAMES</code> dictionary in <code>signal_viewer/config.py</code>. Each entry maps a group name to a dictionary of logical keys &rarr; actual dataset names. You can add more groups, rename datasets, or mark a group as Type B by including an <code>ERROR</code> key:</p>
@@ -120,9 +129,10 @@ python3 -m signal_viewer.server.app</code></pre>
     <details>
       <summary><h2>Navigation</h2></summary>
       <h3>File Selection</h3>
-      <p>The navigation bar at the top provides three cascading dropdowns:</p>
+      <p>The navigation bar at the top provides four cascading dropdowns:</p>
       <ul>
-        <li><strong>Serial</strong>: Select a test serial or unit identifier</li>
+        <li><strong>Root</strong>: Select the data root directory (auto-selected when only one is configured)</li>
+        <li><strong>Serial</strong>: Select a test serial or unit identifier (populated after root selection)</li>
         <li><strong>Step</strong>: Choose a test step (populated after serial selection)</li>
         <li><strong>File</strong>: Select a specific HDF5 file (populated after step selection)</li>
       </ul>

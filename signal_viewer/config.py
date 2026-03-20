@@ -1,13 +1,28 @@
 """Application configuration."""
 import os
+import re
 from pathlib import Path
 
 # Project root: the directory containing this package
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
-# Data root: defaults to <project>/data, overridable via env var
-DATA_ROOT = Path(os.environ.get('SIGNAL_VIEWER_DATA_ROOT',
-                                str(PROJECT_ROOT / 'data')))
+# ---------------------------------------------------------------------------
+# Data roots: dictionary of { display_label: path }
+# ---------------------------------------------------------------------------
+# The ROOT dropdown in the UI presents the keys; the corresponding values
+# are used as the data directory for each root.
+#
+# Override via env var SIGNAL_VIEWER_DATA_ROOT (sets the "Default" entry).
+# Add additional roots by extending this dict.
+DATA_ROOTS = {
+    'Default': Path(os.environ.get('SIGNAL_VIEWER_DATA_ROOT',
+                                   str(PROJECT_ROOT / 'data'))),
+    # 'Lab A': Path('/path/to/lab_a/data'),
+    # 'Lab B': Path('/path/to/lab_b/data'),
+}
+
+# Backward-compat alias: first root path (used internally by tests/legacy code)
+DATA_ROOT = list(DATA_ROOTS.values())[0]
 
 # Server
 HOST = os.environ.get('SIGNAL_VIEWER_HOST', '127.0.0.1')
@@ -47,17 +62,31 @@ class HDF5Schema:
 
     HDF5 internal layout:
       Each group can have its own dataset names, configured via GROUP_DS_NAMES.
-      Common (required) dataset keys: VALUE, TIME, SAMPLING_FREQ, NSAMPLE, NAMES, UNITS
+
+      Required dataset keys:
+        VALUE  — 2D signal data (M signals × N samples)
+        NAMES  — 1D signal names (M,)   [if missing, auto-generated as Signal_0 …]
+
+      Optional dataset keys (graceful fallback when absent):
+        TIME          — epoch ms per signal        [default: 0.0]
+        SAMPLING_FREQ — Hz per signal              [default: parsed from VALUE
+                        dataset name suffix, e.g. _0050 → 50 Hz, else 1.0]
+        NSAMPLE       — valid sample count         [default: full N from VALUE]
+        UNITS         — signal units               [default: "" per signal]
+
       Type B additional (optional) keys: ERROR, SQI, TLS
 
     Batch types:
-      - Type A: only the common datasets (no ERROR key or ERROR maps to None)
-      - Type B: common + ERROR, SQI, TLS
-      Both types have NSAMPLE (valid sample count per signal).
+      - Type A: no ERROR key configured → base datasets only
+      - Type B: ERROR key configured and present → base + error/quality datasets
 
     Time construction (both types):
-      time[i] = TIM[i] + arange(length) * (1000.0 / FRE[i])
-      where TIM is epoch time in milliseconds and FRE is in Hz.
+      time[i] = t0 + arange(n) * (1000.0 / fs)
+      where t0 comes from TIME (or 0.0), n from NSAMPLE (or N),
+      and fs from SAMPLING_FREQ (or parsed from VALUE name, or 1.0).
+
+    Empty groups (no VALUE dataset or VALUE with 0 signals/samples) are
+    silently ignored.
     """
 
     # -- Filesystem conventions -----------------------------------------------
@@ -66,9 +95,18 @@ class HDF5Schema:
     FILE_EXTENSION = '*.h5'          # glob pattern for HDF5 files
     FILE_SUFFIX    = '.h5'           # file suffix for generated files
 
+    # -- Frequency extraction from VALUE dataset name --------------------------
+    # If SAMPLING_FREQ is not configured or absent from the file, the reader
+    # tries to extract Hz from the VALUE dataset name.  The trailing digits
+    # after the last underscore are interpreted as integer Hz.
+    #   e.g.  GROUP_T1_V_0050  →  50 Hz
+    FREQ_SUFFIX_REGEX = r'_(\d+)$'
+
     # -- Per-group dataset name mapping ---------------------------------------
-    # Keys: VALUE, TIME, SAMPLING_FREQ, NSAMPLE, NAMES, UNITS  (required)
-    #        ERROR, SQI, TLS  (optional — present in Type B groups only)
+    # Required keys: VALUE              (must be present in HDF5 file)
+    # Recommended:   NAMES              (auto-generated if absent)
+    # Optional:      TIME, SAMPLING_FREQ, NSAMPLE, UNITS
+    # Type B only:   ERROR, SQI, TLS
     #
     # Each group maps these logical keys to the actual HDF5 dataset name.
     # Group names are derived automatically: list(GROUP_DS_NAMES.keys()).
@@ -117,3 +155,17 @@ class HDF5Schema:
     def default_group(cls):
         """Return the first configured group name (used in tests/mocks)."""
         return cls.group_names()[0]
+
+    @classmethod
+    def parse_freq_from_name(cls, ds_name):
+        """Extract sampling frequency (Hz) from a dataset name suffix.
+
+        Matches trailing ``_DDDD`` where DDDD is one or more digits.
+        Returns the integer value as a float, or None if no match.
+
+        Examples:
+            'GROUP_T1_V_0050' → 50.0
+            'GROUP_T0_V'      → None
+        """
+        m = re.search(cls.FREQ_SUFFIX_REGEX, ds_name)
+        return float(int(m.group(1))) if m else None

@@ -59,8 +59,12 @@ class IntegrationTestBase(_BASE):
 
     # -- Setup / teardown ---------------------------------------------------
 
+    # Root label used by all integration tests
+    ROOT_LABEL = 'Default'
+
     def setUp(self):
         self._original_data_root = config.DATA_ROOT
+        self._original_data_roots = config.DATA_ROOTS.copy()
 
         self.test_data_dir = tempfile.mkdtemp()
         self.serials = ["SN001", "SN002"]
@@ -80,17 +84,24 @@ class IntegrationTestBase(_BASE):
                     self.file_paths[serial][f1][f2] = str(fp)
 
         config.DATA_ROOT = Path(self.test_data_dir)
+        config.DATA_ROOTS = {self.ROOT_LABEL: Path(self.test_data_dir)}
         try:
             super().setUp()
         except Exception:
             config.DATA_ROOT = self._original_data_root
+            config.DATA_ROOTS = self._original_data_roots
             raise
 
     def tearDown(self):
         super().tearDown()
         config.DATA_ROOT = self._original_data_root
+        config.DATA_ROOTS = self._original_data_roots
         if os.path.exists(self.test_data_dir):
             shutil.rmtree(self.test_data_dir)
+
+    def _root_url(self, path: str) -> str:
+        """Prefix an API path with the root label segment."""
+        return f"/api/roots/{quote(self.ROOT_LABEL, safe='')}{path}"
 
     def get_app(self):
         return make_app()
@@ -145,28 +156,37 @@ class TestPageHandlers(IntegrationTestBase):
 # ---------------------------------------------------------------------------
 
 class TestSerialsCascading(IntegrationTestBase):
-    """Test the serials → steps → files metadata cascade."""
+    """Test the root → serials → steps → files metadata cascade."""
+
+    def test_get_roots(self):
+        data = self.get_json("/api/roots")
+        self.assertIn("roots", data)
+        self.assertEqual(len(data["roots"]), 1)
+        self.assertIn(self.ROOT_LABEL, data["roots"])
 
     def test_get_serials(self):
-        data = self.get_json("/api/serials")
+        data = self.get_json(self._root_url("/serials"))
         self.assertIn("serials", data)
         self.assertEqual(len(data["serials"]), 2)
         self.assertIn("SN001", data["serials"])
         self.assertIn("SN002", data["serials"])
 
+    def test_get_serials_missing_root_returns_404(self):
+        self.assertEqual(self.fetch("/api/roots/MISSING/serials").code, 404)
+
     def test_get_steps_for_serial(self):
-        data = self.get_json("/api/serials/SN001/steps")
+        data = self.get_json(self._root_url("/serials/SN001/steps"))
         self.assertIn("steps", data)
         self.assertEqual(len(data["steps"]), 2)
         self.assertIn("p001_test/run_1", data["steps"])
         self.assertIn("p001_test/run_2", data["steps"])
 
     def test_get_steps_missing_serial_returns_404(self):
-        self.assertEqual(self.fetch("/api/serials/MISSING/steps").code, 404)
+        self.assertEqual(self.fetch(self._root_url("/serials/MISSING/steps")).code, 404)
 
     def test_get_files_for_step(self):
         step = quote("p001_test/run_1", safe="")
-        data = self.get_json(f"/api/serials/SN001/steps/{step}/files")
+        data = self.get_json(self._root_url(f"/serials/SN001/steps/{step}/files"))
         self.assertIn("files", data)
         self.assertEqual(len(data["files"]), 1)
         self.assertIsInstance(data["files"][0], dict)
@@ -174,7 +194,7 @@ class TestSerialsCascading(IntegrationTestBase):
 
     def test_get_files_missing_step_returns_404(self):
         self.assertEqual(
-            self.fetch("/api/serials/SN001/steps/missing_step/files").code,
+            self.fetch(self._root_url("/serials/SN001/steps/missing_step/files")).code,
             404,
         )
 
@@ -356,12 +376,12 @@ class TestErrorHandling(IntegrationTestBase):
     """CORS headers, OPTIONS preflight, invalid JSON, caching behaviour."""
 
     def test_cors_headers(self):
-        resp = self.fetch("/api/serials")
+        resp = self.fetch("/api/roots")
         self.assertEqual(resp.headers.get("Access-Control-Allow-Origin"), "*")
         self.assertIn("GET", resp.headers.get("Access-Control-Allow-Methods"))
 
     def test_options_preflight(self):
-        self.assertEqual(self.fetch("/api/serials", method="OPTIONS").code, 204)
+        self.assertEqual(self.fetch("/api/roots", method="OPTIONS").code, 204)
 
     def test_invalid_json_returns_500(self):
         resp = self.fetch(

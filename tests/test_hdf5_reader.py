@@ -3,6 +3,7 @@
 import unittest
 import tempfile
 import shutil
+from unittest.mock import patch
 import numpy as np
 from pathlib import Path
 
@@ -453,6 +454,284 @@ class TestHDF5Reader(unittest.TestCase):
         meta2 = reader.get_group_metadata(S.default_group())
         self.assertEqual(meta1, meta2)
         reader.close()
+
+
+# ---------------------------------------------------------------------------
+# Fallback / optional dataset tests
+# ---------------------------------------------------------------------------
+
+class _CustomMockFile:
+    """Minimal mock HDF5 file with caller-supplied group data."""
+
+    def __init__(self, groups_dict):
+        self._groups = groups_dict
+        self._closed = False
+
+    def keys(self):
+        if self._closed:
+            raise ValueError("closed")
+        return list(self._groups.keys())
+
+    def __getitem__(self, key):
+        if self._closed:
+            raise ValueError("closed")
+        if key not in self._groups:
+            raise KeyError(key)
+        return MockHDF5Group(self._groups[key])
+
+    def __contains__(self, key):
+        return key in self._groups
+
+    def close(self):
+        self._closed = True
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        self.close()
+
+
+def _make_reader_with_mock(groups_dict, tmpdir):
+    """Create an HDF5Reader whose _open_file returns a _CustomMockFile."""
+    fp = Path(tmpdir) / "custom.h5"
+    fp.touch()
+    reader = object.__new__(HDF5Reader)
+    reader.file_path = fp
+    reader._lock = __import__('threading').Lock()
+    reader._file_handle = None
+    reader._groups_cache = None
+    reader._metadata_cache = {}
+    reader._open_file = lambda: _CustomMockFile(groups_dict)
+    return reader
+
+
+class TestOptionalNsample(unittest.TestCase):
+    """NSAMPLE missing → full sample count used."""
+
+    def test_no_nsample_uses_full_length(self):
+        rng = np.random.RandomState(99)
+        gn = S.group_names()[0]
+        ds_map = S.GROUP_DS_NAMES[gn]
+
+        datasets = {
+            ds_map['VALUE']: rng.randn(2, 500).astype(np.float64),
+            ds_map.get('TIME', '_T'): np.array([0.0, 0.0]),
+            ds_map.get('SAMPLING_FREQ', '_F'): np.array([100.0, 100.0]),
+            ds_map.get('NAMES', '_N'): np.array(["sig_a", "sig_b"], dtype=object),
+            ds_map.get('UNITS', '_U'): np.array(["V", "A"], dtype=object),
+            # NSAMPLE intentionally omitted
+        }
+        # Remove placeholder keys that don't match actual ds_map entries
+        datasets = {k: v for k, v in datasets.items()
+                    if k in [ds_map.get(key) for key in ds_map]}
+
+        # Rebuild with only VALUE, TIME, SAMPLING_FREQ, NAMES, UNITS (no NSAMPLE)
+        datasets = {}
+        datasets[ds_map['VALUE']] = rng.randn(2, 500).astype(np.float64)
+        if 'TIME' in ds_map:
+            datasets[ds_map['TIME']] = np.array([0.0, 0.0])
+        if 'SAMPLING_FREQ' in ds_map:
+            datasets[ds_map['SAMPLING_FREQ']] = np.array([100.0, 100.0])
+        if 'NAMES' in ds_map:
+            datasets[ds_map['NAMES']] = np.array(["sig_a", "sig_b"], dtype=object)
+        if 'UNITS' in ds_map:
+            datasets[ds_map['UNITS']] = np.array(["V", "A"], dtype=object)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reader = _make_reader_with_mock({gn: datasets}, tmpdir)
+            meta = reader.get_group_metadata(gn)
+            self.assertEqual(meta["n_samples"], [500, 500])
+            time, sig = reader.load_signal(gn, 0)
+            self.assertEqual(len(sig), 500)
+            self.assertEqual(len(time), 500)
+
+
+class TestOptionalTime(unittest.TestCase):
+    """TIME missing → t0 = 0.0."""
+
+    def test_no_time_defaults_to_zero(self):
+        rng = np.random.RandomState(99)
+        gn = S.group_names()[0]
+        ds_map = S.GROUP_DS_NAMES[gn]
+
+        datasets = {
+            ds_map['VALUE']: rng.randn(2, 100).astype(np.float64),
+            # TIME intentionally omitted
+        }
+        if 'SAMPLING_FREQ' in ds_map:
+            datasets[ds_map['SAMPLING_FREQ']] = np.array([50.0, 50.0])
+        if 'NAMES' in ds_map:
+            datasets[ds_map['NAMES']] = np.array(["a", "b"], dtype=object)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reader = _make_reader_with_mock({gn: datasets}, tmpdir)
+            time, sig = reader.load_signal(gn, 0)
+            # t0 = 0.0, fs = 50 → step = 20 ms
+            expected = np.arange(100, dtype=np.float64) * (1000.0 / 50.0)
+            np.testing.assert_allclose(time, expected, rtol=1e-12)
+
+
+class TestOptionalSamplingFreq(unittest.TestCase):
+    """SAMPLING_FREQ missing → parse from VALUE name or default 1.0."""
+
+    def test_freq_from_value_name_suffix(self):
+        """VALUE name ending in _0050 → 50 Hz."""
+        rng = np.random.RandomState(99)
+
+        # Use a custom config where VALUE name has freq suffix
+        custom_ds = {
+            'VALUE': 'MY_GRP_V_0050',
+            'NAMES': 'MY_GRP_N',
+            # No SAMPLING_FREQ, no TIME, no NSAMPLE
+        }
+        datasets = {
+            'MY_GRP_V_0050': rng.randn(1, 200).astype(np.float64),
+            'MY_GRP_N': np.array(["test_sig"], dtype=object),
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(S.GROUP_DS_NAMES, {'MY_GRP': custom_ds}):
+                reader = _make_reader_with_mock({'MY_GRP': datasets}, tmpdir)
+                time, sig = reader.load_signal('MY_GRP', 0)
+                # fs = 50 → step = 20 ms, t0 = 0
+                expected = np.arange(200, dtype=np.float64) * (1000.0 / 50.0)
+                np.testing.assert_allclose(time, expected, rtol=1e-12)
+
+    def test_freq_default_when_no_suffix(self):
+        """VALUE name without freq suffix → default 1.0 Hz."""
+        rng = np.random.RandomState(99)
+        gn = S.group_names()[0]
+        ds_map = S.GROUP_DS_NAMES[gn]
+
+        datasets = {
+            ds_map['VALUE']: rng.randn(1, 50).astype(np.float64),
+            # No SAMPLING_FREQ, no TIME
+        }
+        if 'NAMES' in ds_map:
+            datasets[ds_map['NAMES']] = np.array(["x"], dtype=object)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reader = _make_reader_with_mock({gn: datasets}, tmpdir)
+            time, sig = reader.load_signal(gn, 0)
+            # fs = 1.0 → step = 1000 ms, t0 = 0
+            expected = np.arange(50, dtype=np.float64) * 1000.0
+            np.testing.assert_allclose(time, expected, rtol=1e-12)
+
+
+class TestOptionalNames(unittest.TestCase):
+    """NAMES missing → auto-generated Signal_0, Signal_1, …"""
+
+    def test_no_names_auto_generated(self):
+        rng = np.random.RandomState(99)
+        gn = S.group_names()[0]
+        ds_map = S.GROUP_DS_NAMES[gn]
+
+        datasets = {
+            ds_map['VALUE']: rng.randn(3, 100).astype(np.float64),
+            # NAMES intentionally omitted
+        }
+        if 'SAMPLING_FREQ' in ds_map:
+            datasets[ds_map['SAMPLING_FREQ']] = np.array([10.0, 10.0, 10.0])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reader = _make_reader_with_mock({gn: datasets}, tmpdir)
+            meta = reader.get_group_metadata(gn)
+            self.assertEqual(meta["signal_names"],
+                             ["Signal_0", "Signal_1", "Signal_2"])
+
+
+class TestEmptyGroupHandling(unittest.TestCase):
+    """Empty groups are excluded from get_groups()."""
+
+    def test_empty_value_dataset_excluded(self):
+        """Group with VALUE shape (0, N) is excluded."""
+        gn = S.group_names()[0]
+        ds_map = S.GROUP_DS_NAMES[gn]
+
+        datasets = {
+            ds_map['VALUE']: np.empty((0, 100), dtype=np.float64),
+        }
+        if 'NAMES' in ds_map:
+            datasets[ds_map['NAMES']] = np.array([], dtype=object)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reader = _make_reader_with_mock({gn: datasets}, tmpdir)
+            groups = reader.get_groups()
+            self.assertNotIn(gn, groups)
+
+    def test_zero_samples_excluded(self):
+        """Group with VALUE shape (M, 0) is excluded."""
+        gn = S.group_names()[0]
+        ds_map = S.GROUP_DS_NAMES[gn]
+
+        datasets = {
+            ds_map['VALUE']: np.empty((4, 0), dtype=np.float64),
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reader = _make_reader_with_mock({gn: datasets}, tmpdir)
+            groups = reader.get_groups()
+            self.assertNotIn(gn, groups)
+
+    def test_missing_value_dataset_excluded(self):
+        """Group present but no VALUE dataset → excluded."""
+        gn = S.group_names()[0]
+        # Group exists but has no VALUE dataset
+        datasets = {"some_other_ds": np.array([1, 2, 3])}
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reader = _make_reader_with_mock({gn: datasets}, tmpdir)
+            groups = reader.get_groups()
+            self.assertNotIn(gn, groups)
+
+    def test_valid_group_alongside_empty(self):
+        """One valid group, one empty → only valid returned."""
+        names = S.group_names()
+        if len(names) < 2:
+            self.skipTest("Need at least 2 configured groups")
+
+        gn_valid = names[0]
+        gn_empty = names[1]
+        ds_valid = S.GROUP_DS_NAMES[gn_valid]
+        ds_empty = S.GROUP_DS_NAMES[gn_empty]
+
+        rng = np.random.RandomState(99)
+        groups = {
+            gn_valid: {
+                ds_valid['VALUE']: rng.randn(2, 100).astype(np.float64),
+            },
+            gn_empty: {
+                ds_empty['VALUE']: np.empty((0, 100), dtype=np.float64),
+            },
+        }
+        if 'NAMES' in ds_valid:
+            groups[gn_valid][ds_valid['NAMES']] = np.array(["a", "b"], dtype=object)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reader = _make_reader_with_mock(groups, tmpdir)
+            result = reader.get_groups()
+            self.assertIn(gn_valid, result)
+            self.assertNotIn(gn_empty, result)
+
+
+class TestParseFreqFromName(unittest.TestCase):
+    """Test HDF5Schema.parse_freq_from_name()."""
+
+    def test_standard_suffix(self):
+        self.assertEqual(S.parse_freq_from_name('GROUP_T1_V_0050'), 50.0)
+
+    def test_large_freq(self):
+        self.assertEqual(S.parse_freq_from_name('GRP_V_10000'), 10000.0)
+
+    def test_no_suffix(self):
+        self.assertIsNone(S.parse_freq_from_name('GROUP_T0_V'))
+
+    def test_trailing_text(self):
+        self.assertIsNone(S.parse_freq_from_name('GROUP_V_abc'))
+
+    def test_zero_padded(self):
+        self.assertEqual(S.parse_freq_from_name('SIG_V_0001'), 1.0)
 
 
 if __name__ == "__main__":

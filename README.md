@@ -6,7 +6,7 @@ A web-based tool for exploring, visualizing, and analyzing time-series engineeri
 ┌─────────────────────────────────────────────────────────────┐
 │                 SIGNAL VIEWER & ANALYZER                    │
 ├─────────────────────────────────────────────────────────────┤
-│ Serials: [SN001] [SN002] [SN003]                           │
+│ Root: [Default ▾]  Serial: [SN001 ▾]  Step: [▾]  File: [▾] │
 ├─────────────────────────────────────────────────────────────┤
 │                                                             │
 │  Signal Plot            │ Statistics  │ Trend Analysis      │
@@ -24,7 +24,7 @@ A web-based tool for exploring, visualizing, and analyzing time-series engineeri
 
 ## Features
 
-- **Data Explorer** — browse your HDF5 data hierarchy (Serial → Step → File) from the sidebar
+- **Data Explorer** — browse your HDF5 data hierarchy (Root → Serial → Step → File) from the top bar; supports multiple data root directories
 - **Interactive Plots** — overlay or subplot layout modes with WebGL-accelerated rendering (Plotly scattergl)
 - **Adaptive Zoom** — click-drag to zoom in; the viewer automatically re-fetches data at higher resolution so you get pixel-level detail at any depth
 - **Statistics** — descriptive stats, rolling statistics, histograms, and rainflow cycle counting
@@ -86,7 +86,7 @@ Navigate to **http://127.0.0.1:8050** and start exploring.
 
 ### Browsing data
 
-The sidebar lists your serial numbers. Expand a serial to see its processing steps, then select a file. The available signal groups appear as collapsible sections — click one to expand it and see the individual signals.
+Start by selecting a **Root** (data location) from the first dropdown. If only one root is configured, it is auto-selected. Then pick a **Serial**, **Step**, and **File**. The available signal groups appear as collapsible sections in the sidebar — click one to expand it and see the individual signals.
 
 ### Plotting signals
 
@@ -116,10 +116,10 @@ The **Docs** page within the app provides an in-app reference for all features a
 Place your HDF5 files inside the `data/` directory following this layout:
 
 ```
-data/
-├── SN001/                        ← serial number
-│   ├── p001_motor_test/          ← processing step (folder_1)
-│   │   ├── run_nominal/          ← run folder (folder_2)
+data/                               ← one data root
+├── SN001/                          ← serial number
+│   ├── p001_motor_test/            ← processing step (folder_1)
+│   │   ├── run_nominal/            ← run folder (folder_2)
 │   │   │   └── data.h5
 │   │   └── run_overload/
 │   │       └── data.h5
@@ -134,11 +134,19 @@ data/
 - **folder_1** must match the pattern `pNNN_label` (e.g. `p001_motor_test`)
 - **folder_2** can be any name (e.g. `run_nominal`, `warmup`, `cycle_1`)
 
-To store data elsewhere, set the environment variable:
+### Multiple data roots
 
-```bash
-export SIGNAL_VIEWER_DATA_ROOT=/path/to/your/data
+The viewer supports multiple data root directories. Each root appears as a selectable option in the **Root** dropdown. Configure them in `signal_viewer/config.py`:
+
+```python
+DATA_ROOTS = {
+    'Default': Path('/path/to/default/data'),
+    'Lab A':   Path('/mnt/lab_a/measurements'),
+    'Lab B':   Path('/mnt/lab_b/measurements'),
+}
 ```
+
+The `SIGNAL_VIEWER_DATA_ROOT` environment variable overrides the path for the "Default" entry. When only one root is configured, it is auto-selected in the UI.
 
 ### HDF5 file structure
 
@@ -148,26 +156,26 @@ The default configuration defines two groups:
 
 **GROUP_T0** (Type A — standard signals):
 
-| Dataset | Example name | Shape | Description |
-|---------|-------------|-------|-------------|
-| VALUE | `GROUP_T0_V` | (M, N) float64 | Signal values — M signals, N samples each |
-| TIME | `GROUP_T0_TIM` | (M,) float64 | Start time per signal (epoch milliseconds) |
-| SAMPLING_FREQ | `GROUP_T0_FRE` | (M,) float64 | Sampling frequency per signal (Hz) |
-| NSAMPLE | `GROUP_T0_SAM` | (M,) int64 | Valid sample count per signal |
-| NAMES | `GROUP_T0_N` | (M,) string | Signal names |
-| UNITS | `GROUP_T0_UNI` | (M,) string | Signal units |
+| Dataset | Example name | Shape | Required | Fallback when absent |
+|---------|-------------|-------|----------|---------------------|
+| VALUE | `GROUP_T0_V` | (M, N) float64 | **Yes** | — |
+| NAMES | `GROUP_T0_N` | (M,) string | Recommended | Auto-generated: Signal_0, Signal_1, … |
+| TIME | `GROUP_T0_TIM` | (M,) float64 | No | 0.0 (epoch ms) |
+| SAMPLING_FREQ | `GROUP_T0_FRE` | (M,) float64 | No | Parsed from VALUE name suffix (e.g. `_0050` → 50 Hz), else 1.0 Hz |
+| NSAMPLE | `GROUP_T0_SAM` | (M,) int64 | No | Full N from VALUE shape |
+| UNITS | `GROUP_T0_UNI` | (M,) string | No | Empty strings |
 
 **GROUP_T1** (Type B — extended signals): all of the above, plus:
 
-| Dataset | Example name | Shape | Description |
-|---------|-------------|-------|-------------|
-| ERROR | `GROUP_T1_ERR` | (M, N) float64 | Error values per signal |
-| SQI | `GROUP_T1_SQI` | (M,) float64 | Signal Quality Index per signal |
-| TLS | `GROUP_T1_TLS` | (M,) float64 | Tolerance values per signal |
+| Dataset | Example name | Shape | Required | Description |
+|---------|-------------|-------|----------|-------------|
+| ERROR | `GROUP_T1_ERR` | (M, N) float64 | No | Error values per signal |
+| SQI | `GROUP_T1_SQI` | (M,) float64 | No | Signal Quality Index per signal |
+| TLS | `GROUP_T1_TLS` | (M,) float64 | No | Tolerance values per signal |
 
-The viewer auto-detects Type A vs Type B based on whether the ERROR dataset is present.
+The viewer auto-detects Type A vs Type B based on whether the ERROR dataset is present. Groups where VALUE is missing or empty (0 signals or 0 samples) are silently ignored.
 
-**Time construction** (both types): the time vector for signal `i` is computed as `TIME[i] + arange(NSAMPLE[i]) × (1000 / SAMPLING_FREQ[i])`, producing timestamps in epoch milliseconds.
+**Time construction** (both types): the time vector for signal `i` is computed as `t0 + arange(n) × (1000 / fs)`, where `t0` comes from TIME (or 0.0 if absent), `n` from NSAMPLE (or the full sample count), and `fs` from SAMPLING_FREQ (or parsed from the VALUE dataset name suffix, or 1.0 Hz). Timestamps are in epoch milliseconds.
 
 ### Creating a compatible file with h5py
 
@@ -215,7 +223,7 @@ Control the server via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
-| `SIGNAL_VIEWER_DATA_ROOT` | `<project>/data/` | Root directory for HDF5 files |
+| `SIGNAL_VIEWER_DATA_ROOT` | `<project>/data/` | Default root directory for HDF5 files (sets the "Default" entry in `DATA_ROOTS`) |
 | `SIGNAL_VIEWER_HOST` | `127.0.0.1` | Server bind address |
 | `SIGNAL_VIEWER_PORT` | `8050` | Server port |
 | `SIGNAL_VIEWER_DEBUG` | `true` | Enable debug mode with auto-reload |
@@ -230,7 +238,7 @@ source venv/bin/activate
 python3 -m unittest discover tests/ -v
 ```
 
-The test suite includes 196 tests covering the HDF5 reader, metadata indexing, signal cache, resampling, statistics, trend analysis, correlation, and full integration tests against the Tornado server. All tests run without requiring real HDF5 data — a built-in mock provides realistic sample signals.
+The test suite includes 212 tests covering the HDF5 reader, metadata indexing, signal cache, resampling, statistics, trend analysis, correlation, and full integration tests against the Tornado server. All tests run without requiring real HDF5 data — a built-in mock provides realistic sample signals.
 
 
 ## Performance Tips

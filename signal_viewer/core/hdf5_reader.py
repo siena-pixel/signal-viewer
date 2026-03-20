@@ -6,14 +6,21 @@ comprehensive metadata handling. Includes a MockHDF5File class for testing
 without h5py dependency.
 
 Dataset names are configured per group via HDF5Schema.GROUP_DS_NAMES.
+Only VALUE is strictly required; all other datasets degrade gracefully:
+
+  NSAMPLE       – missing → use full sample count from VALUE shape
+  TIME          – missing → t0 = 0.0
+  SAMPLING_FREQ – missing → parse Hz from VALUE dataset name suffix
+                             (e.g. _0050 → 50 Hz), else 1.0 Hz
+  NAMES         – missing → auto-generated as Signal_0, Signal_1, …
+  UNITS         – missing → empty strings
+
+Groups where VALUE is absent or empty (0 signals or 0 samples) are
+silently excluded from get_groups().
 
 Batch types:
   Type A – no ERROR key in config → base datasets only
   Type B – ERROR key present → base + error/quality datasets
-
-Time construction (both types):
-  time = TIM[idx] + arange(length) * (1000.0 / FRE[idx])
-  where TIM is epoch time in milliseconds and FRE is in Hz.
 """
 
 import threading
@@ -227,13 +234,34 @@ class HDF5Reader:
     # ------------------------------------------------------------------
 
     def get_groups(self) -> List[str]:
-        """Return configured group names that exist in the file."""
+        """Return configured group names that exist in the file.
+
+        Groups are excluded when:
+        - The group is not present in the file
+        - VALUE dataset is missing from the group
+        - VALUE dataset is empty (0 signals or 0 samples)
+        """
         if self._groups_cache is not None:
             return self._groups_cache
         with self._lock:
             with self._open_file() as f:
                 file_keys = list(f.keys())
-                self._groups_cache = [g for g in S.group_names() if g in file_keys]
+                valid = []
+                for g in S.group_names():
+                    if g not in file_keys:
+                        continue
+                    ds_map = S.GROUP_DS_NAMES[g]
+                    if 'VALUE' not in ds_map:
+                        continue
+                    group = f[g]
+                    if ds_map['VALUE'] not in group:
+                        continue
+                    val = group[ds_map['VALUE']]
+                    if hasattr(val, 'shape'):
+                        if val.ndim < 2 or val.shape[0] == 0 or val.shape[1] == 0:
+                            continue
+                    valid.append(g)
+                self._groups_cache = valid
         return self._groups_cache
 
     # Backward-compatible alias
@@ -266,28 +294,44 @@ class HDF5Reader:
 
                 group = f[group_name]
 
-                if ds_map['VALUE'] not in group or ds_map['NAMES'] not in group:
+                # VALUE is the only strictly required dataset
+                if 'VALUE' not in ds_map or ds_map['VALUE'] not in group:
                     raise ValueError(
-                        f"Group '{group_name}' missing required datasets "
-                        f"(expected '{ds_map['VALUE']}' and '{ds_map['NAMES']}')"
+                        f"Group '{group_name}' missing required VALUE dataset"
                     )
 
-                signal_count = group[ds_map['VALUE']].shape[0]
-                sample_count = group[ds_map['VALUE']].shape[1]
+                val_ds = group[ds_map['VALUE']]
+                signal_count = val_ds.shape[0]
+                sample_count = val_ds.shape[1]
 
-                signal_names = [
-                    n.decode("utf-8") if isinstance(n, bytes) else str(n)
-                    for n in group[ds_map['NAMES']][:]
-                ]
+                if signal_count == 0 or sample_count == 0:
+                    raise ValueError(
+                        f"Group '{group_name}' VALUE dataset is empty"
+                    )
 
-                ds_units = ds_map['UNITS']
-                units_list = [
-                    u.decode("utf-8") if isinstance(u, bytes) else str(u)
-                    for u in group[ds_units][:]
-                ] if ds_units in group else [""] * signal_count
+                # NAMES — optional: auto-generate if absent
+                ds_names = ds_map.get('NAMES')
+                if ds_names and ds_names in group:
+                    signal_names = [
+                        n.decode("utf-8") if isinstance(n, bytes) else str(n)
+                        for n in group[ds_names][:]
+                    ]
+                else:
+                    signal_names = [f"Signal_{i}" for i in range(signal_count)]
 
-                ds_nsample = ds_map['NSAMPLE']
-                if ds_nsample in group:
+                # UNITS — optional: default to empty strings
+                ds_units = ds_map.get('UNITS')
+                if ds_units and ds_units in group:
+                    units_list = [
+                        u.decode("utf-8") if isinstance(u, bytes) else str(u)
+                        for u in group[ds_units][:]
+                    ]
+                else:
+                    units_list = [""] * signal_count
+
+                # NSAMPLE — optional: default to full sample count
+                ds_nsample = ds_map.get('NSAMPLE')
+                if ds_nsample and ds_nsample in group:
                     n_samples = [int(v) for v in group[ds_nsample][:]]
                 else:
                     n_samples = [sample_count] * signal_count
@@ -327,6 +371,10 @@ class HDF5Reader:
 
         time = t0 + arange(n) * (1000.0 / fs)
 
+        Fallbacks:
+          TIME          missing → t0 = 0.0
+          SAMPLING_FREQ missing → parsed from VALUE name suffix, else 1.0 Hz
+
         Returns:
             Tuple of (time_array, signal_values)
         """
@@ -343,8 +391,21 @@ class HDF5Reader:
             with self._open_file() as f:
                 group = f[group_name]
                 signal_data = group[ds_map['VALUE']][signal_index, :n].astype(np.float64)
-                t0 = float(group[ds_map['TIME']][signal_index])
-                fs = float(group[ds_map['SAMPLING_FREQ']][signal_index])
+
+                # TIME — optional: default 0.0
+                ds_time = ds_map.get('TIME')
+                if ds_time and ds_time in group:
+                    t0 = float(group[ds_time][signal_index])
+                else:
+                    t0 = 0.0
+
+                # SAMPLING_FREQ — optional: parse from VALUE name, else 1.0
+                ds_freq = ds_map.get('SAMPLING_FREQ')
+                if ds_freq and ds_freq in group:
+                    fs = float(group[ds_freq][signal_index])
+                else:
+                    parsed = S.parse_freq_from_name(ds_map['VALUE'])
+                    fs = parsed if parsed else 1.0
 
         time_data = t0 + np.arange(n, dtype=np.float64) * (1000.0 / fs)
         return time_data, signal_data

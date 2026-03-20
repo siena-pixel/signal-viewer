@@ -19,6 +19,7 @@ from signal_viewer.core.signal_cache import SignalCache
 from signal_viewer.core.hdf5_reader import HDF5Reader
 from signal_viewer.server.handlers import (
     PageHandler,
+    RootsHandler,
     SerialsHandler,
     StepsHandler,
     FilesHandler,
@@ -49,13 +50,19 @@ class Application(tornado.web.Application):
         """Initialize application with shared context."""
         super().__init__(*args, **kwargs)
 
-        # Initialize metadata index (scans DATA_ROOT)
-        try:
-            self.metadata_index = MetadataIndex(str(config.DATA_ROOT))
-            logger.info(f"MetadataIndex initialized: {self.metadata_index}")
-        except ValueError as e:
-            logger.warning(f"Failed to initialize MetadataIndex: {e}")
-            self.metadata_index = None
+        # Initialize metadata indices — one MetadataIndex per configured root
+        self.metadata_indices: Dict[str, MetadataIndex] = {}
+        for label, root_path in config.DATA_ROOTS.items():
+            try:
+                idx = MetadataIndex(str(root_path))
+                self.metadata_indices[label] = idx
+                logger.info(f"MetadataIndex initialized: {label} → {idx}")
+            except ValueError as e:
+                logger.warning(f"Failed to initialize MetadataIndex for '{label}': {e}")
+
+        # Backward-compat alias (first index, used by legacy code paths)
+        first_label = next(iter(self.metadata_indices), None)
+        self.metadata_index = self.metadata_indices.get(first_label)
 
         # Initialize signal cache
         self.signal_cache = SignalCache(max_memory_bytes=config.CACHE_MAX_MEMORY_BYTES)
@@ -90,10 +97,11 @@ def make_app():
         (r"/analysis", PageHandler, {"template": "analysis.html"}),
         (r"/comparison", PageHandler, {"template": "comparison.html"}),
         (r"/docs", PageHandler, {"template": "documentation.html"}),
-        # API routes
-        (r"/api/serials", SerialsHandler),
-        (r"/api/serials/([^/]+)/steps", StepsHandler),
-        (r"/api/serials/([^/]+)/steps/([^/]+)/files", FilesHandler),
+        # API routes — root-aware cascade
+        (r"/api/roots", RootsHandler),
+        (r"/api/roots/([^/]+)/serials", SerialsHandler),
+        (r"/api/roots/([^/]+)/serials/([^/]+)/steps", StepsHandler),
+        (r"/api/roots/([^/]+)/serials/([^/]+)/steps/([^/]+)/files", FilesHandler),
         (r"/api/files/([^/]+)/batches", BatchesHandler),
         (r"/api/files/([^/]+)/batches/([^/]+)/meta", BatchMetaHandler),
         (
@@ -137,7 +145,8 @@ def main():
     app.listen(config.PORT, config.HOST)
 
     logger.info(f"Starting server on {config.HOST}:{config.PORT}")
-    logger.info(f"Data root: {config.DATA_ROOT}")
+    for label, root_path in config.DATA_ROOTS.items():
+        logger.info(f"Data root: {label} → {root_path}")
     logger.info(f"Debug mode: {config.DEBUG}")
     logger.info(f"Cache budget: {config.CACHE_MAX_MEMORY_MB} MB")
 

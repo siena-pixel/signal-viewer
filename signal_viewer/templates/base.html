@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{% block title %}Signal Viewer{% endblock %}</title>
-  <link rel="stylesheet" href="/static/css/theme.css?v=29">
+  <link rel="stylesheet" href="/static/css/theme.css?v=30">
   <script src="/static/js/vendor/plotly.min.js"></script>
   {% block extra_head %}{% endblock %}
 </head>
@@ -24,8 +24,14 @@
   {% block file_selector %}
   <div class="file-selector-bar" id="fileSelectorBar">
     <div class="form-group">
+      <label for="globalRoot">Root</label>
+      <select id="globalRoot" onchange="GlobalNav.onRootChange()">
+        <option value="">Select root...</option>
+      </select>
+    </div>
+    <div class="form-group">
       <label for="globalSerial">Serial</label>
-      <select id="globalSerial" onchange="GlobalNav.onSerialChange()">
+      <select id="globalSerial" onchange="GlobalNav.onSerialChange()" disabled>
         <option value="">Select serial...</option>
       </select>
     </div>
@@ -73,7 +79,7 @@
     </main>
   </div>
 
-  <script src="/static/js/app.js?v=29"></script>
+  <script src="/static/js/app.js?v=30"></script>
   <script>
   (function() {
     const path = window.location.pathname;
