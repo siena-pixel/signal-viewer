@@ -1,143 +1,175 @@
 # Engineering Signal Viewer & Analyzer
 
-A professional web-based tool for exploring, visualizing, and analyzing time-series engineering data stored in HDF5 format.
+A web-based tool for exploring, visualizing, and analyzing time-series engineering data stored in HDF5 format.
 
 ```
 ┌─────────────────────────────────────────────────────────────┐
 │                 SIGNAL VIEWER & ANALYZER                    │
 ├─────────────────────────────────────────────────────────────┤
-│ Serials: [SN001] [SN002] [SN003]                            │
+│ Serials: [SN001] [SN002] [SN003]                           │
 ├─────────────────────────────────────────────────────────────┤
-│                                                               │
-│  Signal Plot            │ Statistics  │ Trend Analysis       │
-│  ┌──────────────────┐   │ Mean: 5.2   │ Degree 1: 5.1x+0.2   │
-│  │ ╱╲╱╲  ╱╲╱╲       │   │ Std:  1.1   │ Fit quality: 0.94     │
-│  │╱  ╲╱  ╲╱  ╲      │   │ Min:  2.3   │                      │
-│  │                  │   │ Max:  8.1   │ Correlation          │
-│  │ Trends│ Corr    │   │ Median: 5.0 │ Cross-correlation    │
-│  │ Poly-1│ Cross   │   │             │ Max lag: 42 samples  │
-│  └──────────────────┘   │ RMS Trend   │ Analysis Tools       │
-│                         │ Windows: 5  │ Rainflow cycles      │
-│                                       │ Envelope estimation  │
+│                                                             │
+│  Signal Plot            │ Statistics  │ Trend Analysis      │
+│  ┌──────────────────┐   │ Mean: 5.2   │ Degree 1: 5.1x+0.2 │
+│  │ ╱╲╱╲  ╱╲╱╲       │   │ Std:  1.1   │ Fit quality: 0.94  │
+│  │╱  ╲╱  ╲╱  ╲      │   │ Min:  2.3   │                    │
+│  │                  │   │ Max:  8.1   │ Correlation         │
+│  │ Trends│ Corr    │   │ Median: 5.0 │ Cross-correlation   │
+│  │ Poly-1│ Cross   │   │             │ Max lag: 42 samples │
+│  └──────────────────┘   │ RMS Trend   │ Analysis Tools      │
+│                         │ Windows: 5  │ Rainflow cycles     │
+│                                       │ Envelope estimation │
 └─────────────────────────────────────────────────────────────┘
 ```
 
 ## Features
 
-- **Data Explorer**: Browse hierarchical HDF5 structure (Serial → Step → Files)
-- **Signal Viewer**: Interactive time-series plots with two layout modes (overlay / subplots)
-- **Adaptive Zoom**: Click-drag zoom re-fetches data from the server at higher resolution, giving pixel-level detail at any zoom depth without sending the full signal to the browser
-- **Statistical Insights**: Descriptive stats, rolling statistics, rainflow cycle counting
-- **Trend Analysis**: Polynomial fitting, envelope estimation, RMS trends
-- **Correlation**: Cross-correlation and coherence analysis
-- **Performance**: In-memory LRU signal cache, MinMax-LTTB two-pass downsampling, binary-search windowed queries
-- **Signal Types**: Supports Type A (standard) and Type B (extended with error/SQI/TLS) signals, both auto-detected per batch
-- **Responsive UI**: Works on desktop and tablets
-- **CORS-Enabled API**: RESTful endpoints for integration with external tools
+- **Data Explorer** — browse your HDF5 data hierarchy (Serial → Step → File) from the sidebar
+- **Interactive Plots** — overlay or subplot layout modes with WebGL-accelerated rendering (Plotly scattergl)
+- **Adaptive Zoom** — click-drag to zoom in; the viewer automatically re-fetches data at higher resolution so you get pixel-level detail at any depth
+- **Statistics** — descriptive stats, rolling statistics, histograms, and rainflow cycle counting
+- **Trend Analysis** — polynomial fitting, envelope estimation, RMS trend, changepoint detection
+- **Correlation** — cross-correlation, coherence, and correlation matrices
+- **Signal Comparison** — compare signals across different files or groups side-by-side
+- **Signal Types** — supports Type A (standard) and Type B (extended with error, SQI, and TLS datasets), auto-detected per group
+- **Performance** — in-memory LRU signal cache with configurable budget, two-pass MinMax-LTTB downsampling, binary-search windowed queries
+- **REST API** — all data is served through CORS-enabled JSON endpoints, so you can integrate with external tools
+
 
 ## Quick Start
 
-### 1. Clone or Download
+### 1. Clone or download
 
 ```bash
 git clone https://github.com/yourusername/03_hdf5_signal_viewer.git
 cd 03_hdf5_signal_viewer
 ```
 
-### 2. Create Python Environment
+### 2. Set up the Python environment
 
 ```bash
 bash create_venv.sh
-source venv/bin/activate  # On Windows: venv\Scripts\activate
+source venv/bin/activate
 ```
 
-### 3. Add Your Data
+This creates a virtual environment and installs all dependencies.
 
-Generate realistic dummy data to explore the app immediately:
+### 3. Generate sample data (optional)
+
+To try the app right away without your own data:
 
 ```bash
-python generate_dummy_data.py
+python3 generate_dummy_data.py
 ```
 
-This creates 3 serial numbers, multiple processing steps, and batches with 16 different
-engineering signals (vibration, temperature, pressure, motor current, strain, etc.) totalling
-50k-150k samples each.
+This creates three serial numbers with multiple processing steps and realistic engineering signals (vibration, temperature, pressure, motor current, strain, and more).
 
-Or place your own HDF5 data inside `data/`:
-
-```
-03_hdf5_signal_viewer/
-├── data/
-│   ├── SN001/
-│   │   ├── p001_motor_test/
-│   │   │   ├── run_nominal/
-│   │   │   │   └── data.h5
-│   │   │   ├── run_overload/ ...
-│   ├── SN002/ ...
-```
-
-The folder structure is: `root / serial / folder_1 / folder_2 / file.h5`
-- `serial`: Top-level serial number directory (e.g., SN001, SN002)
-- `folder_1`: Test identifier matching pattern `p\d{3}_.*` (e.g., p001_motor_test)
-- `folder_2`: Any subfolder name (e.g., run_nominal, warmup)
-
-Override the data location with an environment variable if your data lives elsewhere:
+### 4. Start the server
 
 ```bash
-export SIGNAL_VIEWER_DATA_ROOT=/path/to/external/data
+bash run.sh
 ```
 
-### 4. Start the Server
+Or manually:
 
 ```bash
+source venv/bin/activate
 python3 -m signal_viewer.server.app
-# Or use: bash run.sh
 ```
 
-### 5. Open Browser
+### 5. Open your browser
 
-Visit: http://127.0.0.1:8050
+Navigate to **http://127.0.0.1:8050** and start exploring.
 
-## Data Format
 
-### HDF5 File Structure
+## Using the Viewer
 
-Each `.h5` file must contain one or more groups with the following structure:
+### Browsing data
+
+The sidebar lists your serial numbers. Expand a serial to see its processing steps, then select a file. The available signal groups appear as collapsible sections — click one to expand it and see the individual signals.
+
+### Plotting signals
+
+Click a signal name to add it to the plot area. You can overlay up to five signals on a single chart or switch to subplots mode for a stacked view. Each signal card shows the signal name, group, and unit.
+
+### Zooming and navigation
+
+Click and drag on the plot to zoom into a region. The viewer re-fetches only the visible window at higher resolution, so zooming in always reveals more detail. Use the **Reset Zoom** button to return to the full view.
+
+### Analysis tools
+
+The **Analysis** page provides statistical analysis, trend fitting, and correlation tools. Select a file and signal, then choose your analysis type. Results are displayed alongside interactive plots.
+
+### Signal comparison
+
+The **Comparison** page lets you load signals from different files or groups and view them side-by-side for cross-comparison.
+
+### Documentation
+
+The **Docs** page within the app provides an in-app reference for all features and API endpoints.
+
+
+## Preparing Your Data
+
+### Folder structure
+
+Place your HDF5 files inside the `data/` directory following this layout:
 
 ```
-file.h5
-├── GROUP_T0
-│   ├── GROUP_T0_T (1D array, float64): Time coordinates [N]
-│   ├── GROUP_T0_P (1D array, float64): Corrected time values [N]
-│   ├── GROUP_T0_V (2D array, float64): Signal data [M, N]
-│   │   - M: number of signals
-│   │   - N: number of samples per signal
-│   ├── GROUP_T0_N (1D array, string): Signal names [M]
-│   ├── GROUP_T0_U (1D array, string): Signal units [M]
-│   ├── GROUP_T0_SAM (scalar, int):    Actual sample count (truncation length)
-│   ├── GROUP_T0_ERR (2D, optional):   Error datasets (Type B only)
-│   ├── GROUP_T0_SQI (2D, optional):   Signal Quality Index (Type B only)
-│   └── GROUP_T0_TLS (2D, optional):   Tolerance datasets (Type B only)
-├── GROUP_T1
+data/
+├── SN001/                        ← serial number
+│   ├── p001_motor_test/          ← processing step (folder_1)
+│   │   ├── run_nominal/          ← run folder (folder_2)
+│   │   │   └── data.h5
+│   │   └── run_overload/
+│   │       └── data.h5
+│   └── p002_vibration/
+│       └── baseline/
+│           └── data.h5
+├── SN002/
 │   └── ...
 ```
 
-Dataset names are built as: `GROUP_NAME + suffix`
-- `_V`: Values (signals)
-- `_T`: Time coordinates
-- `_P`: Positions (corrected time)
-- `_N`: Signal names
-- `_U`: Signal units
-- `_SAM`: Number of valid samples (all signals truncated to this length)
+- **Serial directories** must start with `SN` (configurable)
+- **folder_1** must match the pattern `pNNN_label` (e.g. `p001_motor_test`)
+- **folder_2** can be any name (e.g. `run_nominal`, `warmup`, `cycle_1`)
 
-### Signal Types
+To store data elsewhere, set the environment variable:
 
-The reader auto-detects the signal type per batch:
+```bash
+export SIGNAL_VIEWER_DATA_ROOT=/path/to/your/data
+```
 
-- **Type A** (standard): Only signal datasets present. Truncated by `_SAM`. Time is constructed as `t0 + i × (1000 / fs)` ms.
-- **Type B** (extended): Signal datasets alongside `_ERR`, `_SQI`, `_TLS` companion datasets. Also truncated by `_SAM`. Time constructed identically.
+### HDF5 file structure
 
-### Example with h5py
+Each `.h5` file contains one or more **groups**. Each group holds a set of time-series signals with associated metadata. The mapping between logical dataset roles and actual HDF5 dataset names is defined in the configuration (`signal_viewer/config.py`) via `GROUP_DS_NAMES`.
+
+The default configuration defines two groups:
+
+**GROUP_T0** (Type A — standard signals):
+
+| Dataset | Example name | Shape | Description |
+|---------|-------------|-------|-------------|
+| VALUE | `GROUP_T0_V` | (M, N) float64 | Signal values — M signals, N samples each |
+| TIME | `GROUP_T0_TIM` | (M,) float64 | Start time per signal (epoch milliseconds) |
+| SAMPLING_FREQ | `GROUP_T0_FRE` | (M,) float64 | Sampling frequency per signal (Hz) |
+| NSAMPLE | `GROUP_T0_SAM` | (M,) int64 | Valid sample count per signal |
+| NAMES | `GROUP_T0_N` | (M,) string | Signal names |
+| UNITS | `GROUP_T0_UNI` | (M,) string | Signal units |
+
+**GROUP_T1** (Type B — extended signals): all of the above, plus:
+
+| Dataset | Example name | Shape | Description |
+|---------|-------------|-------|-------------|
+| ERROR | `GROUP_T1_ERR` | (M, N) float64 | Error values per signal |
+| SQI | `GROUP_T1_SQI` | (M,) float64 | Signal Quality Index per signal |
+| TLS | `GROUP_T1_TLS` | (M,) float64 | Tolerance values per signal |
+
+The viewer auto-detects Type A vs Type B based on whether the ERROR dataset is present.
+
+**Time construction** (both types): the time vector for signal `i` is computed as `TIME[i] + arange(NSAMPLE[i]) × (1000 / SAMPLING_FREQ[i])`, producing timestamps in epoch milliseconds.
+
+### Creating a compatible file with h5py
 
 ```python
 import h5py
@@ -146,148 +178,77 @@ import numpy as np
 with h5py.File('data.h5', 'w') as f:
     grp = f.create_group('GROUP_T0')
 
-    # Create datasets
-    t = np.linspace(0, 10, 1000)
-    signals = np.random.randn(4, 1000)
-
-    grp.create_dataset('GROUP_T0_T', data=t)
-    grp.create_dataset('GROUP_T0_P', data=t)
-    grp.create_dataset('GROUP_T0_V', data=signals)
-    grp.create_dataset('GROUP_T0_N',
-        data=np.array(['position', 'velocity', 'current', 'voltage']))
-    grp.create_dataset('GROUP_T0_U',
-        data=np.array(['m', 'm/s', 'A', 'V']))
+    n_signals, n_samples = 4, 10000
+    grp.create_dataset('GROUP_T0_V',   data=np.random.randn(n_signals, n_samples))
+    grp.create_dataset('GROUP_T0_TIM', data=np.full(n_signals, 1700000000000.0))
+    grp.create_dataset('GROUP_T0_FRE', data=np.array([100.0, 200.0, 100.0, 500.0]))
+    grp.create_dataset('GROUP_T0_SAM', data=np.array([10000, 10000, 10000, 10000]))
+    grp.create_dataset('GROUP_T0_N',   data=['position', 'velocity', 'current', 'voltage'])
+    grp.create_dataset('GROUP_T0_UNI', data=['m', 'm/s', 'A', 'V'])
 ```
+
+### Customizing the schema
+
+To adapt the viewer to your own HDF5 naming convention, edit the `GROUP_DS_NAMES` dictionary in `signal_viewer/config.py`. Each entry maps a group name to a dictionary of logical keys → actual dataset names. You can add more groups, rename datasets, or mark a group as Type B by including an `ERROR` key:
+
+```python
+GROUP_DS_NAMES = {
+    'MY_GROUP': {
+        'VALUE':         'my_values',
+        'TIME':          'my_timestamps',
+        'SAMPLING_FREQ': 'my_fs',
+        'NSAMPLE':       'my_nsamples',
+        'NAMES':         'my_signal_names',
+        'UNITS':         'my_units',
+        # Add these for Type B:
+        # 'ERROR': 'my_errors',
+        # 'SQI':   'my_sqi',
+        # 'TLS':   'my_tls',
+    },
+}
+```
+
 
 ## Configuration
 
-Control behavior via environment variables:
+Control the server via environment variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `SIGNAL_VIEWER_DATA_ROOT` | `<project>/data/` | Root directory for HDF5 files |
 | `SIGNAL_VIEWER_HOST` | `127.0.0.1` | Server bind address |
 | `SIGNAL_VIEWER_PORT` | `8050` | Server port |
-| `SIGNAL_VIEWER_DEBUG` | `true` | Enable debug mode (auto-reload) |
-| `SIGNAL_VIEWER_CACHE_MB` | `500` | Signal cache budget in MB |
+| `SIGNAL_VIEWER_DEBUG` | `true` | Enable debug mode with auto-reload |
+| `SIGNAL_VIEWER_VERBOSE` | `false` | Log detailed error tracebacks |
+| `SIGNAL_VIEWER_CACHE_MB` | `500` | Signal cache memory budget (MB) |
 
-## Architecture
 
-```
-signal_viewer/
-├── server/              # Tornado web server
-│   ├── app.py          # Application setup & routing
-│   └── handlers.py     # Request handlers (JSON API)
-├── core/               # Data handling
-│   ├── hdf5_reader.py  # HDF5 file I/O
-│   ├── metadata_index.py  # Filesystem scanning
-│   └── signal_cache.py    # In-memory caching
-├── processing/         # Signal analysis algorithms
-│   ├── statistics.py   # Descriptive stats, rainflow
-│   ├── correlation.py  # Cross-correlation, coherence
-│   ├── trend.py        # Polynomial fitting, envelopes
-│   └── resampling.py   # MinMax-LTTB two-pass downsampling
-├── templates/          # Jinja2 HTML templates
-└── visualization/      # Client-side plotting (JavaScript)
-```
-
-## API Reference
-
-### Metadata Endpoints
-
-```
-GET /api/serials                          # List serial numbers
-GET /api/serials/{serial}/steps           # List steps (folder_1) for serial
-GET /api/serials/{serial}/steps/{step}/files # List files in step
-GET /api/files/{encoded_path}/batches     # List groups in file
-GET /api/files/{encoded_path}/batches/{group}/meta  # Group metadata
-```
-
-### Signal Loading
-
-```
-GET /api/files/{encoded_path}/batches/{group}/signals/{idx}
-    ?downsample=N              # target point count (default: full, max 10000)
-    &t_min=<epoch_ms>          # left edge of visible window (adaptive zoom)
-    &t_max=<epoch_ms>          # right edge of visible window (adaptive zoom)
-```
-
-Returns: `{time, values, name, units, samples, total_samples, t_start, t_end, windowed}`
-
-When `t_min`/`t_max` are given, the server binary-searches the cached signal and returns only the matching segment. Combine with `downsample` for adaptive zoom — the browser gets pixel-level detail at any zoom depth while never exceeding N points.
-
-### Analysis Endpoints (POST)
-
-```
-POST /api/analysis/stats       # Signal statistics, rainflow cycles
-POST /api/analysis/trend       # Polynomial trend fitting
-POST /api/analysis/correlation # Cross-correlation
-```
-
-### Utility Endpoints
-
-```
-GET /api/cache/stats           # Cache performance metrics
-POST /api/rescan               # Re-scan filesystem
-```
-
-## Development
-
-### Running Tests
-
-Run all unit and integration tests:
+## Running Tests
 
 ```bash
+source venv/bin/activate
 python3 -m unittest discover tests/ -v
 ```
 
-Run specific test suite:
+The test suite includes 196 tests covering the HDF5 reader, metadata indexing, signal cache, resampling, statistics, trend analysis, correlation, and full integration tests against the Tornado server. All tests run without requiring real HDF5 data — a built-in mock provides realistic sample signals.
 
-```bash
-python3 -m unittest tests.test_integration -v
-python3 -m unittest tests.test_hdf5_reader -v
-```
 
-### Test Coverage
+## Performance Tips
 
-- Unit tests for each processing module
-- Integration tests for Tornado handlers
-- Mock HDF5 file support for testing without h5py
+- **Cache budget** — increase `SIGNAL_VIEWER_CACHE_MB` if you have spare RAM. The LRU cache keeps full signals in memory so repeated zoom queries skip disk I/O entirely.
+- **Adaptive zoom** — the viewer handles resolution automatically. When you zoom in, it requests only the visible window at higher point density.
+- **Large files** — signals are truncated to their declared `NSAMPLE` length, so unused buffer space in the HDF5 arrays is never loaded.
+- **Concurrent access** — the server uses thread-safe file handles and a thread-pool executor for analysis, so multiple browser tabs work without blocking each other.
 
-### Project Structure for Testing
-
-Tests expect data in standard format:
-```
-tests/
-├── test_integration.py      # Server & API tests
-├── test_hdf5_reader.py      # File I/O tests
-├── test_metadata_index.py   # Filesystem scanning tests
-├── test_signal_cache.py     # Caching tests
-└── ...                      # Signal processing tests
-```
 
 ## Requirements
 
 - Python 3.9+
-- tornado (async web server)
-- numpy (numerical computing)
-- h5py (HDF5 file access)
-- jinja2 (HTML templating)
-- plotly (visualization)
+- numpy, tornado, h5py, Jinja2, plotly
 
-See `requirements.txt` for exact versions.
+See `requirements.txt` for exact versions. All dependencies are installed automatically by `create_venv.sh`.
 
-## Performance Tips
-
-1. **Caching**: Configure `SIGNAL_VIEWER_CACHE_MB` based on available RAM — the LRU cache keeps full signals in memory so repeated zoom queries avoid disk I/O
-2. **Adaptive Zoom**: The viewer automatically re-fetches at higher resolution when you zoom in; no manual `downsample` tuning needed for interactive use
-3. **Downsampling**: For API consumers, use `?downsample=N` and `?t_min=…&t_max=…` to control the point count and window
-4. **Analysis**: Correlation and trend computations run in a thread-pool executor so the server stays responsive during heavy queries
 
 ## License
 
-MIT License - See LICENSE file for details.
-
-## Support
-
-For issues, feature requests, or contributions, please visit the project repository.
+MIT License — see LICENSE file for details.

@@ -15,17 +15,26 @@
     <details open>
       <summary><h2>Getting Started</h2></summary>
       <h3>Installation</h3>
-      <p>Clone the repository and install dependencies:</p>
+      <p>Clone the repository and set up the Python environment:</p>
       <pre><code>git clone &lt;repo-url&gt;
-cd signal_viewer
-pip install -r requirements.txt</code></pre>
+cd 03_hdf5_signal_viewer
+bash create_venv.sh
+source venv/bin/activate</code></pre>
 
-      <h3>Setup</h3>
-      <p>Set the HDF5 data root directory:</p>
-      <pre><code>export SIGNAL_VIEWER_DATA_ROOT=/path/to/hdf5/files</code></pre>
-      <p>Start the development server:</p>
-      <pre><code>python -m signal_viewer.server.app</code></pre>
+      <h3>Generate sample data (optional)</h3>
+      <p>To explore the app without your own data, generate realistic dummy signals:</p>
+      <pre><code>python3 generate_dummy_data.py</code></pre>
+
+      <h3>Start the server</h3>
+      <pre><code>bash run.sh</code></pre>
+      <p>Or manually:</p>
+      <pre><code>source venv/bin/activate
+python3 -m signal_viewer.server.app</code></pre>
       <p>Open your browser and navigate to <code>http://127.0.0.1:8050</code></p>
+
+      <h3>Using your own data</h3>
+      <p>Place HDF5 files inside the <code>data/</code> directory following the folder structure described in the Data Format section below. Alternatively, point to an external directory:</p>
+      <pre><code>export SIGNAL_VIEWER_DATA_ROOT=/path/to/your/data</code></pre>
     </details>
 
     <details>
@@ -43,28 +52,69 @@ pip install -r requirements.txt</code></pre>
 └── SN002/</code></pre>
 
       <h3>HDF5 Internal Structure</h3>
-      <p>Each <code>.h5</code> file contains one or more groups (batches) with dataset suffixes:</p>
-      <pre><code>data.h5
-├── GROUP_T0/
-│   ├── GROUP_T0_V    (2D float64) signal values [M signals × N samples]
-│   ├── GROUP_T0_TIM  (1D float64) epoch ms of first sample per signal [M]
-│   ├── GROUP_T0_FRE  (1D float64) sampling frequency in Hz [M]
-│   ├── GROUP_T0_SAM  (1D int64)   valid sample count per signal [M]
-│   ├── GROUP_T0_N    (1D string)  signal names [M]
-│   ├── GROUP_T0_UNI  (1D string)  signal units [M]
-│   ├── GROUP_T0_ERR  (2D, optional — Type B only)
-│   ├── GROUP_T0_SQI  (1D, optional — Type B only)
-│   └── GROUP_T0_TLS  (1D, optional — Type B only)
-└── GROUP_T1/
-    └── ...</code></pre>
+      <p>Each <code>.h5</code> file contains one or more groups. The mapping between logical dataset roles and actual HDF5 dataset names is configured per group in <code>signal_viewer/config.py</code> via the <code>GROUP_DS_NAMES</code> dictionary. The default configuration defines:</p>
+
+      <p><strong>GROUP_T0</strong> (Type A &mdash; standard signals):</p>
+      <table style="width:100%; border-collapse:collapse; margin:10px 0;">
+        <thead>
+          <tr style="border-bottom:2px solid var(--color-border); text-align:left;">
+            <th style="padding:6px 10px;">Role</th>
+            <th style="padding:6px 10px;">Dataset name</th>
+            <th style="padding:6px 10px;">Shape</th>
+            <th style="padding:6px 10px;">Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td style="padding:4px 10px;"><code>VALUE</code></td><td style="padding:4px 10px;"><code>GROUP_T0_V</code></td><td style="padding:4px 10px;">(M, N) float64</td><td style="padding:4px 10px;">Signal values &mdash; M signals, N samples each</td></tr>
+          <tr><td style="padding:4px 10px;"><code>TIME</code></td><td style="padding:4px 10px;"><code>GROUP_T0_TIM</code></td><td style="padding:4px 10px;">(M,) float64</td><td style="padding:4px 10px;">Start time per signal (epoch milliseconds)</td></tr>
+          <tr><td style="padding:4px 10px;"><code>SAMPLING_FREQ</code></td><td style="padding:4px 10px;"><code>GROUP_T0_FRE</code></td><td style="padding:4px 10px;">(M,) float64</td><td style="padding:4px 10px;">Sampling frequency per signal (Hz)</td></tr>
+          <tr><td style="padding:4px 10px;"><code>NSAMPLE</code></td><td style="padding:4px 10px;"><code>GROUP_T0_SAM</code></td><td style="padding:4px 10px;">(M,) int64</td><td style="padding:4px 10px;">Valid sample count per signal</td></tr>
+          <tr><td style="padding:4px 10px;"><code>NAMES</code></td><td style="padding:4px 10px;"><code>GROUP_T0_N</code></td><td style="padding:4px 10px;">(M,) string</td><td style="padding:4px 10px;">Signal names</td></tr>
+          <tr><td style="padding:4px 10px;"><code>UNITS</code></td><td style="padding:4px 10px;"><code>GROUP_T0_UNI</code></td><td style="padding:4px 10px;">(M,) string</td><td style="padding:4px 10px;">Signal units</td></tr>
+        </tbody>
+      </table>
+
+      <p><strong>GROUP_T1</strong> (Type B &mdash; extended signals): all of the above, plus:</p>
+      <table style="width:100%; border-collapse:collapse; margin:10px 0;">
+        <thead>
+          <tr style="border-bottom:2px solid var(--color-border); text-align:left;">
+            <th style="padding:6px 10px;">Role</th>
+            <th style="padding:6px 10px;">Dataset name</th>
+            <th style="padding:6px 10px;">Shape</th>
+            <th style="padding:6px 10px;">Description</th>
+          </tr>
+        </thead>
+        <tbody>
+          <tr><td style="padding:4px 10px;"><code>ERROR</code></td><td style="padding:4px 10px;"><code>GROUP_T1_ERR</code></td><td style="padding:4px 10px;">(M, N) float64</td><td style="padding:4px 10px;">Error values per signal</td></tr>
+          <tr><td style="padding:4px 10px;"><code>SQI</code></td><td style="padding:4px 10px;"><code>GROUP_T1_SQI</code></td><td style="padding:4px 10px;">(M,) float64</td><td style="padding:4px 10px;">Signal Quality Index per signal</td></tr>
+          <tr><td style="padding:4px 10px;"><code>TLS</code></td><td style="padding:4px 10px;"><code>GROUP_T1_TLS</code></td><td style="padding:4px 10px;">(M,) float64</td><td style="padding:4px 10px;">Tolerance values per signal</td></tr>
+        </tbody>
+      </table>
 
       <h3>Signal Types</h3>
-      <p>The reader supports two signal types, detected automatically per batch:</p>
+      <p>The reader auto-detects the signal type per group based on whether an <code>ERROR</code> dataset is configured and present:</p>
       <ul>
-        <li><strong>Type A</strong> (standard): signal datasets only. Truncated by the <code>_SAM</code> (n_samples) attribute. Time is constructed as <code>t0 + i &times; (1000 / fs)</code> ms.</li>
-        <li><strong>Type B</strong> (extended): signal datasets alongside <code>_ERR</code>, <code>_SQI</code>, <code>_TLS</code> companion datasets. Also truncated by <code>_SAM</code>. Time constructed identically.</li>
+        <li><strong>Type A</strong> (standard): base datasets only (VALUE, TIME, SAMPLING_FREQ, NSAMPLE, NAMES, UNITS). Signals are truncated to the per-signal valid sample count (NSAMPLE). Time is constructed as <code>TIME[i] + arange(NSAMPLE[i]) &times; (1000 / SAMPLING_FREQ[i])</code> ms.</li>
+        <li><strong>Type B</strong> (extended): base datasets plus ERROR, SQI, and TLS companion datasets. Same truncation and time construction as Type A.</li>
       </ul>
-      <p>Each signal is a row in the <code>_V</code> matrix, truncated to <code>_SAM</code> samples. Signal names and units are read from the <code>_N</code> and <code>_UNI</code> datasets. Supported file extensions: <code>.h5</code>, <code>.hdf5</code>.</p>
+      <p>Each signal is a row in the VALUE matrix. Signal names and units are read from the NAMES and UNITS datasets. Supported file extension: <code>.h5</code>.</p>
+
+      <h3>Customizing the schema</h3>
+      <p>To adapt the viewer to your own HDF5 naming convention, edit the <code>GROUP_DS_NAMES</code> dictionary in <code>signal_viewer/config.py</code>. Each entry maps a group name to a dictionary of logical keys &rarr; actual dataset names. You can add more groups, rename datasets, or mark a group as Type B by including an <code>ERROR</code> key:</p>
+      <pre><code>GROUP_DS_NAMES = {
+    'MY_GROUP': {
+        'VALUE':         'my_values',
+        'TIME':          'my_timestamps',
+        'SAMPLING_FREQ': 'my_fs',
+        'NSAMPLE':       'my_nsamples',
+        'NAMES':         'my_signal_names',
+        'UNITS':         'my_units',
+        # Add these for Type B:
+        # 'ERROR': 'my_errors',
+        # 'SQI':   'my_sqi',
+        # 'TLS':   'my_tls',
+    },
+}</code></pre>
     </details>
 
     <details>
