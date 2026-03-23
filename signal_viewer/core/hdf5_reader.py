@@ -309,12 +309,17 @@ class HDF5Reader:
                         f"Group '{group_name}' VALUE dataset is empty"
                     )
 
-                # NAMES — optional: auto-generate if absent
+                # NAMES — optional: auto-generate if absent or blank
                 ds_names = ds_map.get('NAMES')
                 if ds_names and ds_names in group:
-                    signal_names = [
-                        n.decode("utf-8") if isinstance(n, bytes) else str(n)
+                    raw_names = [
+                        n.decode("utf-8").strip() if isinstance(n, bytes) else str(n).strip()
                         for n in group[ds_names][:]
+                    ]
+                    # Replace any blank entries with auto-generated names
+                    signal_names = [
+                        name if name else f"Signal_{i}"
+                        for i, name in enumerate(raw_names)
                     ]
                 else:
                     signal_names = [f"Signal_{i}" for i in range(signal_count)]
@@ -323,7 +328,7 @@ class HDF5Reader:
                 ds_units = ds_map.get('UNITS')
                 if ds_units and ds_units in group:
                     units_list = [
-                        u.decode("utf-8") if isinstance(u, bytes) else str(u)
+                        u.decode("utf-8").strip() if isinstance(u, bytes) else str(u).strip()
                         for u in group[ds_units][:]
                     ]
                 else:

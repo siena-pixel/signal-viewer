@@ -625,6 +625,13 @@ const GlobalNav = {
     const units = meta.units || [];
     const count = meta.signal_count || names.length;
 
+    // Empty group — show badge "0" but no signal items
+    if (count === 0) {
+      group.appendChild(header);
+      group.appendChild(list);
+      return group;
+    }
+
     // Build index array and sort alphabetically by signal name
     const sorted = Array.from({ length: count }, (_, i) => i)
       .sort((a, b) => {
@@ -634,7 +641,10 @@ const GlobalNav = {
       });
 
     for (const i of sorted) {
-      const name = names[i] || `signal_${String(i).padStart(3, '0')}`;
+      // Defensive: skip signals with blank/missing names (shouldn't happen
+      // after backend fix, but guard against it just in case)
+      const rawName = (names[i] || '').trim();
+      const name = rawName || `Signal_${i}`;
       const unit = units[i] || '';
 
       const item = document.createElement('div');

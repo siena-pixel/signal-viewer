@@ -715,6 +715,114 @@ class TestEmptyGroupHandling(unittest.TestCase):
             self.assertNotIn(gn_empty, result)
 
 
+class TestBlankNamesReplacement(unittest.TestCase):
+    """NAMES with blank/empty entries → replaced with Signal_N."""
+
+    def test_blank_names_replaced(self):
+        """Blank entries in NAMES dataset get auto-generated names."""
+        rng = np.random.RandomState(99)
+        gn = S.group_names()[0]
+        ds_map = S.GROUP_DS_NAMES[gn]
+
+        datasets = {
+            ds_map['VALUE']: rng.randn(4, 100).astype(np.float64),
+        }
+        if 'NAMES' in ds_map:
+            # Mix of real names, empty strings, and whitespace-only
+            datasets[ds_map['NAMES']] = np.array(
+                ["position", "", "  ", "voltage"], dtype=object
+            )
+        if 'SAMPLING_FREQ' in ds_map:
+            datasets[ds_map['SAMPLING_FREQ']] = np.array([10.0] * 4)
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reader = _make_reader_with_mock({gn: datasets}, tmpdir)
+            meta = reader.get_group_metadata(gn)
+            self.assertEqual(meta["signal_names"][0], "position")
+            self.assertEqual(meta["signal_names"][1], "Signal_1")
+            self.assertEqual(meta["signal_names"][2], "Signal_2")
+            self.assertEqual(meta["signal_names"][3], "voltage")
+
+    def test_bytes_names_decoded_and_stripped(self):
+        """Bytes NAMES entries are decoded to str and stripped."""
+        rng = np.random.RandomState(99)
+        gn = S.group_names()[0]
+        ds_map = S.GROUP_DS_NAMES[gn]
+
+        datasets = {
+            ds_map['VALUE']: rng.randn(2, 100).astype(np.float64),
+        }
+        if 'NAMES' in ds_map:
+            datasets[ds_map['NAMES']] = np.array(
+                [b"  pressure  ", b""], dtype=object
+            )
+        if 'SAMPLING_FREQ' in ds_map:
+            datasets[ds_map['SAMPLING_FREQ']] = np.array([10.0, 10.0])
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reader = _make_reader_with_mock({gn: datasets}, tmpdir)
+            meta = reader.get_group_metadata(gn)
+            self.assertEqual(meta["signal_names"][0], "pressure")
+            self.assertEqual(meta["signal_names"][1], "Signal_1")
+
+
+class TestValueOnlyGroup(unittest.TestCase):
+    """Group with ONLY VALUE dataset — all optional datasets missing."""
+
+    def test_value_only_metadata(self):
+        rng = np.random.RandomState(99)
+        gn = S.group_names()[0]
+        ds_map = S.GROUP_DS_NAMES[gn]
+
+        datasets = {
+            ds_map['VALUE']: rng.randn(3, 200).astype(np.float64),
+            # All other datasets intentionally omitted
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reader = _make_reader_with_mock({gn: datasets}, tmpdir)
+            meta = reader.get_group_metadata(gn)
+            self.assertEqual(meta["signal_count"], 3)
+            self.assertEqual(meta["sample_count"], 200)
+            self.assertEqual(meta["signal_names"],
+                             ["Signal_0", "Signal_1", "Signal_2"])
+            self.assertEqual(meta["units"], ["", "", ""])
+            self.assertEqual(meta["n_samples"], [200, 200, 200])
+
+    def test_value_only_load_signal(self):
+        rng = np.random.RandomState(99)
+        gn = S.group_names()[0]
+        ds_map = S.GROUP_DS_NAMES[gn]
+
+        datasets = {
+            ds_map['VALUE']: rng.randn(2, 150).astype(np.float64),
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reader = _make_reader_with_mock({gn: datasets}, tmpdir)
+            time, sig = reader.load_signal(gn, 0)
+            self.assertEqual(len(sig), 150)
+            self.assertEqual(len(time), 150)
+            # t0=0, fs=1.0 (default) → step = 1000 ms
+            expected = np.arange(150, dtype=np.float64) * 1000.0
+            np.testing.assert_allclose(time, expected, rtol=1e-12)
+
+    def test_value_only_stats(self):
+        rng = np.random.RandomState(99)
+        gn = S.group_names()[0]
+        ds_map = S.GROUP_DS_NAMES[gn]
+
+        datasets = {
+            ds_map['VALUE']: rng.randn(2, 150).astype(np.float64),
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reader = _make_reader_with_mock({gn: datasets}, tmpdir)
+            stats = reader.get_signal_stats(gn, 0)
+            self.assertEqual(stats["samples"], 150)
+            self.assertTrue(np.isfinite(stats["mean"]))
+
+
 class TestParseFreqFromName(unittest.TestCase):
     """Test HDF5Schema.parse_freq_from_name()."""
 

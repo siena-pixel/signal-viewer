@@ -238,7 +238,7 @@ source venv/bin/activate
 python3 -m unittest discover tests/ -v
 ```
 
-The test suite includes 212 tests covering the HDF5 reader, metadata indexing, signal cache, resampling, statistics, trend analysis, correlation, and full integration tests against the Tornado server. All tests run without requiring real HDF5 data — a built-in mock provides realistic sample signals.
+The test suite includes 217 tests covering the HDF5 reader, metadata indexing, signal cache, resampling, statistics, trend analysis, correlation, and full integration tests against the Tornado server. All tests run without requiring real HDF5 data — a built-in mock provides realistic sample signals.
 
 
 ## Performance Tips
