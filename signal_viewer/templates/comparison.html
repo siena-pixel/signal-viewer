@@ -64,8 +64,29 @@ function cmpEpochMsToDateStrings(timeArr) {
 async function onCmpSignalClick(batch, idx, name, units) {
   // Prevent overlapping requests that cause frozen / inconsistent state
   if (_cmpBusy) return;
-  _cmpBusy = true;
 
+  // Toggle: if clicking an already-selected signal, deselect it
+  if (cmp.sigA && cmp.sigA.batch === batch && cmp.sigA.idx === idx) {
+    // Remove A — promote B to A
+    cmp.sigA = cmp.sigB;  cmp.dataA = cmp.dataB;
+    cmp.sigB = null;      cmp.dataB = null;
+    renderChips();
+    renderAllPlots();
+    updateCmpSidebarActive();
+    saveCmpState();
+    return;
+  }
+  if (cmp.sigB && cmp.sigB.batch === batch && cmp.sigB.idx === idx) {
+    // Remove B
+    cmp.sigB = null; cmp.dataB = null;
+    renderChips();
+    renderAllPlots();
+    updateCmpSidebarActive();
+    saveCmpState();
+    return;
+  }
+
+  _cmpBusy = true;
   const meta = { batch, idx, name, units };
 
   try {

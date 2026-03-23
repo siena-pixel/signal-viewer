@@ -240,8 +240,7 @@ async function addSignal(batch, idx, name, units) {
 
   const key = `${batch}::${idx}`;
   if (signals.some(s => `${s.batch}::${s.idx}` === key)) {
-    showToast('Signal already loaded', 'info');
-    return;
+    return;  // already loaded — toggle handled by onSidebarSignalClick
   }
 
   try {
@@ -1103,7 +1102,14 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (GlobalNav._ready) await GlobalNav._ready;
 
   GlobalNav.onSidebarSignalClick = (batch, idx, name, units) => {
-    addSignal(batch, idx, name, units);
+    // Toggle: if already loaded, remove it; otherwise add it
+    const key = `${batch}::${idx}`;
+    const existingIdx = signals.findIndex(s => `${s.batch}::${s.idx}` === key);
+    if (existingIdx !== -1) {
+      removeSignal(existingIdx);
+    } else {
+      addSignal(batch, idx, name, units);
+    }
   };
 
   GlobalNav.onSelectionChange = function () {

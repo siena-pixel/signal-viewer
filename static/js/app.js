@@ -308,6 +308,39 @@ const URLState = {
   load() {
     try { return JSON.parse(sessionStorage.getItem('globalNavState')); }
     catch (_) { return null; }
+  },
+  saveSidebar() {
+    const el = GlobalNav._sidebarEl;
+    if (!el) return;
+    const expanded = [];
+    el.querySelectorAll('.batch-group').forEach((grp, i) => {
+      const list = grp.querySelector('.batch-group-items');
+      if (list && list.style.display !== 'none') expanded.push(i);
+    });
+    sessionStorage.setItem('sidebarState', JSON.stringify({
+      expanded,
+      scrollTop: el.scrollTop
+    }));
+  },
+  restoreSidebar() {
+    try {
+      const saved = JSON.parse(sessionStorage.getItem('sidebarState'));
+      if (!saved) return;
+      const el = GlobalNav._sidebarEl;
+      if (!el) return;
+      const groups = el.querySelectorAll('.batch-group');
+      groups.forEach((grp, i) => {
+        const list = grp.querySelector('.batch-group-items');
+        const header = grp.querySelector('.batch-group-header');
+        if (!list || !header) return;
+        const shouldExpand = saved.expanded.includes(i);
+        list.style.display = shouldExpand ? 'block' : 'none';
+        header.classList.toggle('collapsed', !shouldExpand);
+      });
+      if (typeof saved.scrollTop === 'number') {
+        el.scrollTop = saved.scrollTop;
+      }
+    } catch (_) { /* ignore */ }
   }
 };
 
@@ -355,6 +388,15 @@ const GlobalNav = {
     if (!this._rootEl || !this._serialEl || !this._stepEl || !this._fileEl) {
       // Page without file selector (e.g. docs)
       return;
+    }
+
+    // Persist sidebar scroll position on scroll (debounced)
+    if (this._sidebarEl) {
+      let _sbTimer = null;
+      this._sidebarEl.addEventListener('scroll', () => {
+        clearTimeout(_sbTimer);
+        _sbTimer = setTimeout(() => URLState.saveSidebar(), 200);
+      });
     }
 
     try {
@@ -601,6 +643,9 @@ const GlobalNav = {
       const group = this._buildBatchGroup(batchName, meta, false);
       this._sidebarEl.appendChild(group);
     }
+
+    // Restore expanded/scroll state from previous page visit
+    URLState.restoreSidebar();
   },
 
   _buildBatchGroup(batchName, meta, expanded) {
@@ -641,10 +686,7 @@ const GlobalNav = {
       });
 
     for (const i of sorted) {
-      // Defensive: skip signals with blank/missing names (shouldn't happen
-      // after backend fix, but guard against it just in case)
-      const rawName = (names[i] || '').trim();
-      const name = rawName || `Signal_${i}`;
+      const name = names[i] || `signal_${String(i).padStart(3, '0')}`;
       const unit = units[i] || '';
 
       const item = document.createElement('div');
@@ -669,6 +711,7 @@ const GlobalNav = {
       const isOpen = list.style.display !== 'none';
       list.style.display = isOpen ? 'none' : 'block';
       header.classList.toggle('collapsed', isOpen);
+      URLState.saveSidebar();
     });
 
     group.appendChild(header);

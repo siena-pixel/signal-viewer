@@ -65,10 +65,15 @@ class HDF5Schema:
 
       Required dataset keys:
         VALUE  — 2D signal data (M signals × N samples)
-        NAMES  — 1D signal names (M,)   [if missing, auto-generated as Signal_0 …]
+        NAMES  — 1D signal names (M,); must be present and non-blank for every
+                 signal.  Groups with missing NAMES or any blank entry are
+                 excluded (treated as invalid).
 
       Optional dataset keys (graceful fallback when absent):
-        TIME          — epoch ms per signal        [default: 0.0]
+        TIME              — epoch ms per signal    [default: see TIME_FALLBACK]
+        TIME_FALLBACK     — (config only, not an HDF5 dataset) name of another
+                            group to borrow TIME from when TIME is absent.
+                            Match is by signal name.  Set per group or omit.
         SAMPLING_FREQ — Hz per signal              [default: parsed from VALUE
                         dataset name suffix, e.g. _0050 → 50 Hz, else 1.0]
         NSAMPLE       — valid sample count         [default: full N from VALUE]
@@ -104,12 +109,18 @@ class HDF5Schema:
 
     # -- Per-group dataset name mapping ---------------------------------------
     # Required keys: VALUE              (must be present in HDF5 file)
-    # Recommended:   NAMES              (auto-generated if absent)
+    #                NAMES              (must be present; all entries non-blank)
     # Optional:      TIME, SAMPLING_FREQ, NSAMPLE, UNITS
     # Type B only:   ERROR, SQI, TLS
     #
     # Each group maps these logical keys to the actual HDF5 dataset name.
     # Group names are derived automatically: list(GROUP_DS_NAMES.keys()).
+
+    # -- TIME fallback --------------------------------------------------------
+    # When TIME is missing for a group, the reader tries to borrow the time
+    # value from a signal with the same name in the group specified by
+    # TIME_FALLBACK (a per-group config key, not an HDF5 dataset).
+    # Omit or set to None to disable (defaults to t0 = 0.0).
     GROUP_DS_NAMES = {
         'GROUP_T0': {
             'VALUE':         'GROUP_T0_V',
@@ -119,6 +130,7 @@ class HDF5Schema:
             'NAMES':         'GROUP_T0_N',
             'UNITS':         'GROUP_T0_UNI',
             # Type A — no ERROR/SQI/TLS
+            # 'TIME_FALLBACK': 'GROUP_T1',  # example: borrow TIME from GROUP_T1
         },
         'GROUP_T1': {
             'VALUE':         'GROUP_T1_V',
@@ -131,6 +143,7 @@ class HDF5Schema:
             'ERROR':         'GROUP_T1_ERR',
             'SQI':           'GROUP_T1_SQI',
             'TLS':           'GROUP_T1_TLS',
+            # 'TIME_FALLBACK': 'GROUP_T0',  # example: borrow TIME from GROUP_T0
         },
     }
 

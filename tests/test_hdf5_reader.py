@@ -619,10 +619,11 @@ class TestOptionalSamplingFreq(unittest.TestCase):
             np.testing.assert_allclose(time, expected, rtol=1e-12)
 
 
-class TestOptionalNames(unittest.TestCase):
-    """NAMES missing → auto-generated Signal_0, Signal_1, …"""
+class TestRequiredNames(unittest.TestCase):
+    """NAMES is required — missing or blank entries make group invalid."""
 
-    def test_no_names_auto_generated(self):
+    def test_missing_names_excluded_from_groups(self):
+        """Group without NAMES dataset is excluded from get_groups()."""
         rng = np.random.RandomState(99)
         gn = S.group_names()[0]
         ds_map = S.GROUP_DS_NAMES[gn]
@@ -631,14 +632,86 @@ class TestOptionalNames(unittest.TestCase):
             ds_map['VALUE']: rng.randn(3, 100).astype(np.float64),
             # NAMES intentionally omitted
         }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reader = _make_reader_with_mock({gn: datasets}, tmpdir)
+            groups = reader.get_groups()
+            self.assertNotIn(gn, groups)
+
+    def test_missing_names_raises_in_metadata(self):
+        """get_group_metadata raises ValueError when NAMES is absent."""
+        rng = np.random.RandomState(99)
+        gn = S.group_names()[0]
+        ds_map = S.GROUP_DS_NAMES[gn]
+
+        datasets = {
+            ds_map['VALUE']: rng.randn(2, 100).astype(np.float64),
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reader = _make_reader_with_mock({gn: datasets}, tmpdir)
+            with self.assertRaises(ValueError):
+                reader.get_group_metadata(gn)
+
+    def test_blank_names_excluded_from_groups(self):
+        """Group with blank entries in NAMES is excluded from get_groups()."""
+        rng = np.random.RandomState(99)
+        gn = S.group_names()[0]
+        ds_map = S.GROUP_DS_NAMES[gn]
+
+        datasets = {
+            ds_map['VALUE']: rng.randn(3, 100).astype(np.float64),
+        }
+        if 'NAMES' in ds_map:
+            datasets[ds_map['NAMES']] = np.array(
+                ["position", "", "voltage"], dtype=object
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reader = _make_reader_with_mock({gn: datasets}, tmpdir)
+            groups = reader.get_groups()
+            self.assertNotIn(gn, groups)
+
+    def test_blank_names_raises_in_metadata(self):
+        """get_group_metadata raises ValueError when NAMES has blanks."""
+        rng = np.random.RandomState(99)
+        gn = S.group_names()[0]
+        ds_map = S.GROUP_DS_NAMES[gn]
+
+        datasets = {
+            ds_map['VALUE']: rng.randn(2, 100).astype(np.float64),
+        }
+        if 'NAMES' in ds_map:
+            datasets[ds_map['NAMES']] = np.array(
+                ["position", "  "], dtype=object
+            )
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reader = _make_reader_with_mock({gn: datasets}, tmpdir)
+            with self.assertRaises(ValueError):
+                reader.get_group_metadata(gn)
+
+    def test_bytes_names_decoded_and_stripped(self):
+        """Bytes NAMES entries are decoded to str and stripped."""
+        rng = np.random.RandomState(99)
+        gn = S.group_names()[0]
+        ds_map = S.GROUP_DS_NAMES[gn]
+
+        datasets = {
+            ds_map['VALUE']: rng.randn(2, 100).astype(np.float64),
+        }
+        if 'NAMES' in ds_map:
+            datasets[ds_map['NAMES']] = np.array(
+                [b"  pressure  ", b"voltage"], dtype=object
+            )
         if 'SAMPLING_FREQ' in ds_map:
-            datasets[ds_map['SAMPLING_FREQ']] = np.array([10.0, 10.0, 10.0])
+            datasets[ds_map['SAMPLING_FREQ']] = np.array([10.0, 10.0])
 
         with tempfile.TemporaryDirectory() as tmpdir:
             reader = _make_reader_with_mock({gn: datasets}, tmpdir)
             meta = reader.get_group_metadata(gn)
-            self.assertEqual(meta["signal_names"],
-                             ["Signal_0", "Signal_1", "Signal_2"])
+            self.assertEqual(meta["signal_names"][0], "pressure")
+            self.assertEqual(meta["signal_names"][1], "voltage")
 
 
 class TestEmptyGroupHandling(unittest.TestCase):
@@ -715,68 +788,17 @@ class TestEmptyGroupHandling(unittest.TestCase):
             self.assertNotIn(gn_empty, result)
 
 
-class TestBlankNamesReplacement(unittest.TestCase):
-    """NAMES with blank/empty entries → replaced with Signal_N."""
+class TestMinimalGroup(unittest.TestCase):
+    """Group with VALUE + NAMES only — all optional datasets missing."""
 
-    def test_blank_names_replaced(self):
-        """Blank entries in NAMES dataset get auto-generated names."""
-        rng = np.random.RandomState(99)
-        gn = S.group_names()[0]
-        ds_map = S.GROUP_DS_NAMES[gn]
-
-        datasets = {
-            ds_map['VALUE']: rng.randn(4, 100).astype(np.float64),
-        }
-        if 'NAMES' in ds_map:
-            # Mix of real names, empty strings, and whitespace-only
-            datasets[ds_map['NAMES']] = np.array(
-                ["position", "", "  ", "voltage"], dtype=object
-            )
-        if 'SAMPLING_FREQ' in ds_map:
-            datasets[ds_map['SAMPLING_FREQ']] = np.array([10.0] * 4)
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            reader = _make_reader_with_mock({gn: datasets}, tmpdir)
-            meta = reader.get_group_metadata(gn)
-            self.assertEqual(meta["signal_names"][0], "position")
-            self.assertEqual(meta["signal_names"][1], "Signal_1")
-            self.assertEqual(meta["signal_names"][2], "Signal_2")
-            self.assertEqual(meta["signal_names"][3], "voltage")
-
-    def test_bytes_names_decoded_and_stripped(self):
-        """Bytes NAMES entries are decoded to str and stripped."""
-        rng = np.random.RandomState(99)
-        gn = S.group_names()[0]
-        ds_map = S.GROUP_DS_NAMES[gn]
-
-        datasets = {
-            ds_map['VALUE']: rng.randn(2, 100).astype(np.float64),
-        }
-        if 'NAMES' in ds_map:
-            datasets[ds_map['NAMES']] = np.array(
-                [b"  pressure  ", b""], dtype=object
-            )
-        if 'SAMPLING_FREQ' in ds_map:
-            datasets[ds_map['SAMPLING_FREQ']] = np.array([10.0, 10.0])
-
-        with tempfile.TemporaryDirectory() as tmpdir:
-            reader = _make_reader_with_mock({gn: datasets}, tmpdir)
-            meta = reader.get_group_metadata(gn)
-            self.assertEqual(meta["signal_names"][0], "pressure")
-            self.assertEqual(meta["signal_names"][1], "Signal_1")
-
-
-class TestValueOnlyGroup(unittest.TestCase):
-    """Group with ONLY VALUE dataset — all optional datasets missing."""
-
-    def test_value_only_metadata(self):
+    def test_minimal_group_metadata(self):
         rng = np.random.RandomState(99)
         gn = S.group_names()[0]
         ds_map = S.GROUP_DS_NAMES[gn]
 
         datasets = {
             ds_map['VALUE']: rng.randn(3, 200).astype(np.float64),
-            # All other datasets intentionally omitted
+            ds_map['NAMES']: np.array(["sig_a", "sig_b", "sig_c"], dtype=object),
         }
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -785,17 +807,18 @@ class TestValueOnlyGroup(unittest.TestCase):
             self.assertEqual(meta["signal_count"], 3)
             self.assertEqual(meta["sample_count"], 200)
             self.assertEqual(meta["signal_names"],
-                             ["Signal_0", "Signal_1", "Signal_2"])
+                             ["sig_a", "sig_b", "sig_c"])
             self.assertEqual(meta["units"], ["", "", ""])
             self.assertEqual(meta["n_samples"], [200, 200, 200])
 
-    def test_value_only_load_signal(self):
+    def test_minimal_group_load_signal(self):
         rng = np.random.RandomState(99)
         gn = S.group_names()[0]
         ds_map = S.GROUP_DS_NAMES[gn]
 
         datasets = {
             ds_map['VALUE']: rng.randn(2, 150).astype(np.float64),
+            ds_map['NAMES']: np.array(["x", "y"], dtype=object),
         }
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -807,13 +830,14 @@ class TestValueOnlyGroup(unittest.TestCase):
             expected = np.arange(150, dtype=np.float64) * 1000.0
             np.testing.assert_allclose(time, expected, rtol=1e-12)
 
-    def test_value_only_stats(self):
+    def test_minimal_group_stats(self):
         rng = np.random.RandomState(99)
         gn = S.group_names()[0]
         ds_map = S.GROUP_DS_NAMES[gn]
 
         datasets = {
             ds_map['VALUE']: rng.randn(2, 150).astype(np.float64),
+            ds_map['NAMES']: np.array(["x", "y"], dtype=object),
         }
 
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -821,6 +845,164 @@ class TestValueOnlyGroup(unittest.TestCase):
             stats = reader.get_signal_stats(gn, 0)
             self.assertEqual(stats["samples"], 150)
             self.assertTrue(np.isfinite(stats["mean"]))
+
+
+class TestTimeFallback(unittest.TestCase):
+    """Per-group TIME_FALLBACK — borrow t0 from same-named signal in another group."""
+
+    def test_fallback_provides_time(self):
+        """Signal in group without TIME gets t0 from its TIME_FALLBACK group."""
+        rng = np.random.RandomState(99)
+        names = S.group_names()
+        if len(names) < 2:
+            self.skipTest("Need at least 2 configured groups")
+
+        gn_fb = names[0]   # fallback group (has TIME)
+        gn_target = names[1]  # target group (no TIME, TIME_FALLBACK → gn_fb)
+        ds_fb = S.GROUP_DS_NAMES[gn_fb]
+        ds_target = S.GROUP_DS_NAMES[gn_target]
+
+        groups = {
+            gn_fb: {
+                ds_fb['VALUE']: rng.randn(2, 100).astype(np.float64),
+                ds_fb['NAMES']: np.array(["alpha", "beta"], dtype=object),
+                ds_fb['TIME']: np.array([1000.0, 2000.0]),
+                ds_fb['SAMPLING_FREQ']: np.array([100.0, 100.0]),
+            },
+            gn_target: {
+                ds_target['VALUE']: rng.randn(2, 80).astype(np.float64),
+                ds_target['NAMES']: np.array(["alpha", "beta"], dtype=object),
+                ds_target['SAMPLING_FREQ']: np.array([50.0, 50.0]),
+                # TIME intentionally omitted
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reader = _make_reader_with_mock(groups, tmpdir)
+            # Inject TIME_FALLBACK into the target group's config
+            with patch.dict(S.GROUP_DS_NAMES[gn_target],
+                            {'TIME_FALLBACK': gn_fb}):
+                time, sig = reader.load_signal(gn_target, 0)
+                # t0 should come from gn_fb's TIME for "alpha" → 1000.0
+                expected = 1000.0 + np.arange(80, dtype=np.float64) * (1000.0 / 50.0)
+                np.testing.assert_allclose(time, expected, rtol=1e-12)
+
+    def test_fallback_name_not_found_defaults_zero(self):
+        """If signal name not in fallback group, t0 = 0.0."""
+        rng = np.random.RandomState(99)
+        names = S.group_names()
+        if len(names) < 2:
+            self.skipTest("Need at least 2 configured groups")
+
+        gn_fb = names[0]
+        gn_target = names[1]
+        ds_fb = S.GROUP_DS_NAMES[gn_fb]
+        ds_target = S.GROUP_DS_NAMES[gn_target]
+
+        groups = {
+            gn_fb: {
+                ds_fb['VALUE']: rng.randn(1, 100).astype(np.float64),
+                ds_fb['NAMES']: np.array(["alpha"], dtype=object),
+                ds_fb['TIME']: np.array([5000.0]),
+                ds_fb['SAMPLING_FREQ']: np.array([100.0]),
+            },
+            gn_target: {
+                ds_target['VALUE']: rng.randn(1, 60).astype(np.float64),
+                ds_target['NAMES']: np.array(["gamma"], dtype=object),
+                ds_target['SAMPLING_FREQ']: np.array([25.0]),
+            },
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reader = _make_reader_with_mock(groups, tmpdir)
+            with patch.dict(S.GROUP_DS_NAMES[gn_target],
+                            {'TIME_FALLBACK': gn_fb}):
+                time, sig = reader.load_signal(gn_target, 0)
+                # "gamma" not in fallback → t0 = 0.0
+                expected = np.arange(60, dtype=np.float64) * (1000.0 / 25.0)
+                np.testing.assert_allclose(time, expected, rtol=1e-12)
+
+    def test_no_fallback_configured(self):
+        """When TIME_FALLBACK is absent from group config, t0 = 0.0."""
+        rng = np.random.RandomState(99)
+        gn = S.group_names()[0]
+        ds_map = S.GROUP_DS_NAMES[gn]
+
+        datasets = {
+            ds_map['VALUE']: rng.randn(1, 50).astype(np.float64),
+            ds_map['NAMES']: np.array(["x"], dtype=object),
+            ds_map['SAMPLING_FREQ']: np.array([10.0]),
+            # TIME intentionally omitted; no TIME_FALLBACK in default config
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reader = _make_reader_with_mock({gn: datasets}, tmpdir)
+            time, sig = reader.load_signal(gn, 0)
+            expected = np.arange(50, dtype=np.float64) * (1000.0 / 10.0)
+            np.testing.assert_allclose(time, expected, rtol=1e-12)
+
+    def test_each_group_can_have_different_fallback(self):
+        """Two groups with different TIME_FALLBACK targets."""
+        rng = np.random.RandomState(99)
+        names = S.group_names()
+        if len(names) < 2:
+            self.skipTest("Need at least 2 configured groups")
+
+        gn_a = names[0]
+        gn_b = names[1]
+        ds_a = S.GROUP_DS_NAMES[gn_a]
+        ds_b = S.GROUP_DS_NAMES[gn_b]
+
+        groups = {
+            gn_a: {
+                ds_a['VALUE']: rng.randn(1, 40).astype(np.float64),
+                ds_a['NAMES']: np.array(["sig1"], dtype=object),
+                ds_a['TIME']: np.array([100.0]),
+                ds_a['SAMPLING_FREQ']: np.array([10.0]),
+            },
+            gn_b: {
+                ds_b['VALUE']: rng.randn(1, 40).astype(np.float64),
+                ds_b['NAMES']: np.array(["sig1"], dtype=object),
+                ds_b['TIME']: np.array([200.0]),
+                ds_b['SAMPLING_FREQ']: np.array([10.0]),
+            },
+        }
+
+        # Custom groups that use each other as fallback
+        custom_c = {
+            'VALUE': 'C_V', 'NAMES': 'C_N', 'SAMPLING_FREQ': 'C_F',
+            'TIME_FALLBACK': gn_a,
+        }
+        custom_d = {
+            'VALUE': 'D_V', 'NAMES': 'D_N', 'SAMPLING_FREQ': 'D_F',
+            'TIME_FALLBACK': gn_b,
+        }
+        groups['GRP_C'] = {
+            'C_V': rng.randn(1, 30).astype(np.float64),
+            'C_N': np.array(["sig1"], dtype=object),
+            'C_F': np.array([20.0]),
+        }
+        groups['GRP_D'] = {
+            'D_V': rng.randn(1, 30).astype(np.float64),
+            'D_N': np.array(["sig1"], dtype=object),
+            'D_F': np.array([20.0]),
+        }
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            with patch.dict(S.GROUP_DS_NAMES,
+                            {'GRP_C': custom_c, 'GRP_D': custom_d}):
+                reader = _make_reader_with_mock(groups, tmpdir)
+
+                # GRP_C falls back to gn_a → t0 = 100.0
+                time_c, _ = reader.load_signal('GRP_C', 0)
+                expected_c = 100.0 + np.arange(30, dtype=np.float64) * (1000.0 / 20.0)
+                np.testing.assert_allclose(time_c, expected_c, rtol=1e-12)
+
+                # GRP_D falls back to gn_b → t0 = 200.0
+                reader._metadata_cache.clear()
+                time_d, _ = reader.load_signal('GRP_D', 0)
+                expected_d = 200.0 + np.arange(30, dtype=np.float64) * (1000.0 / 20.0)
+                np.testing.assert_allclose(time_d, expected_d, rtol=1e-12)
 
 
 class TestParseFreqFromName(unittest.TestCase):

@@ -6,17 +6,21 @@ comprehensive metadata handling. Includes a MockHDF5File class for testing
 without h5py dependency.
 
 Dataset names are configured per group via HDF5Schema.GROUP_DS_NAMES.
-Only VALUE is strictly required; all other datasets degrade gracefully:
 
+Required datasets (group is invalid without these):
+  VALUE  – 2D signal data (M × N); must have >0 signals and >0 samples
+  NAMES  – 1D signal names (M,); must be present and every entry non-blank
+
+Optional datasets (graceful fallback when absent):
   NSAMPLE       – missing → use full sample count from VALUE shape
-  TIME          – missing → t0 = 0.0
+  TIME          – missing → cross-group fallback via per-group TIME_FALLBACK
+                             config key, else t0 = 0.0
   SAMPLING_FREQ – missing → parse Hz from VALUE dataset name suffix
                              (e.g. _0050 → 50 Hz), else 1.0 Hz
-  NAMES         – missing → auto-generated as Signal_0, Signal_1, …
   UNITS         – missing → empty strings
 
-Groups where VALUE is absent or empty (0 signals or 0 samples) are
-silently excluded from get_groups().
+Groups where VALUE or NAMES is absent/invalid are silently excluded
+from get_groups().
 
 Batch types:
   Type A – no ERROR key in config → base datasets only
@@ -238,8 +242,9 @@ class HDF5Reader:
 
         Groups are excluded when:
         - The group is not present in the file
-        - VALUE dataset is missing from the group
-        - VALUE dataset is empty (0 signals or 0 samples)
+        - VALUE dataset is missing or empty (0 signals or 0 samples)
+        - NAMES dataset is missing
+        - Any entry in NAMES is blank (after stripping whitespace)
         """
         if self._groups_cache is not None:
             return self._groups_cache
@@ -260,6 +265,21 @@ class HDF5Reader:
                     if hasattr(val, 'shape'):
                         if val.ndim < 2 or val.shape[0] == 0 or val.shape[1] == 0:
                             continue
+
+                    # NAMES is required: must exist and every entry non-blank
+                    ds_names = ds_map.get('NAMES')
+                    if not ds_names or ds_names not in group:
+                        continue
+                    raw_names = group[ds_names][:]
+                    names_valid = True
+                    for n in raw_names:
+                        s = n.decode("utf-8").strip() if isinstance(n, bytes) else str(n).strip()
+                        if not s:
+                            names_valid = False
+                            break
+                    if not names_valid:
+                        continue
+
                     valid.append(g)
                 self._groups_cache = valid
         return self._groups_cache
@@ -309,20 +329,20 @@ class HDF5Reader:
                         f"Group '{group_name}' VALUE dataset is empty"
                     )
 
-                # NAMES — optional: auto-generate if absent or blank
+                # NAMES — required: must be present with all non-blank entries
                 ds_names = ds_map.get('NAMES')
-                if ds_names and ds_names in group:
-                    raw_names = [
-                        n.decode("utf-8").strip() if isinstance(n, bytes) else str(n).strip()
-                        for n in group[ds_names][:]
-                    ]
-                    # Replace any blank entries with auto-generated names
-                    signal_names = [
-                        name if name else f"Signal_{i}"
-                        for i, name in enumerate(raw_names)
-                    ]
-                else:
-                    signal_names = [f"Signal_{i}" for i in range(signal_count)]
+                if not ds_names or ds_names not in group:
+                    raise ValueError(
+                        f"Group '{group_name}' missing required NAMES dataset"
+                    )
+                signal_names = [
+                    n.decode("utf-8").strip() if isinstance(n, bytes) else str(n).strip()
+                    for n in group[ds_names][:]
+                ]
+                if any(not name for name in signal_names):
+                    raise ValueError(
+                        f"Group '{group_name}' has blank entries in NAMES dataset"
+                    )
 
                 # UNITS — optional: default to empty strings
                 ds_units = ds_map.get('UNITS')
@@ -377,7 +397,9 @@ class HDF5Reader:
         time = t0 + arange(n) * (1000.0 / fs)
 
         Fallbacks:
-          TIME          missing → t0 = 0.0
+          TIME          missing → cross-group fallback via per-group
+                                  TIME_FALLBACK key (match by signal name),
+                                  else t0 = 0.0
           SAMPLING_FREQ missing → parsed from VALUE name suffix, else 1.0 Hz
 
         Returns:
@@ -397,12 +419,16 @@ class HDF5Reader:
                 group = f[group_name]
                 signal_data = group[ds_map['VALUE']][signal_index, :n].astype(np.float64)
 
-                # TIME — optional: default 0.0
+                # TIME — optional: try own group first
                 ds_time = ds_map.get('TIME')
                 if ds_time and ds_time in group:
                     t0 = float(group[ds_time][signal_index])
                 else:
-                    t0 = 0.0
+                    # Cross-group fallback: look up same signal name in
+                    # the configured TIME_FALLBACK_GROUP
+                    t0 = self._time_fallback(
+                        f, group_name, metadata["signal_names"][signal_index]
+                    )
 
                 # SAMPLING_FREQ — optional: parse from VALUE name, else 1.0
                 ds_freq = ds_map.get('SAMPLING_FREQ')
@@ -414,6 +440,46 @@ class HDF5Reader:
 
         time_data = t0 + np.arange(n, dtype=np.float64) * (1000.0 / fs)
         return time_data, signal_data
+
+    def _time_fallback(self, f, source_group: str, signal_name: str) -> float:
+        """Resolve t0 via per-group TIME_FALLBACK for a signal by name.
+
+        If the source group's config contains a TIME_FALLBACK key pointing
+        to another group that is present in the file and contains a signal
+        with the same name, return that group's TIME value.
+        Otherwise return 0.0.
+        """
+        fb_group = S.GROUP_DS_NAMES[source_group].get('TIME_FALLBACK')
+        if not fb_group or fb_group == source_group:
+            return 0.0
+        if fb_group not in S.GROUP_DS_NAMES:
+            return 0.0
+
+        fb_ds_map = S.GROUP_DS_NAMES[fb_group]
+        if fb_group not in f:
+            return 0.0
+
+        fb_grp = f[fb_group]
+
+        # Check the fallback group has TIME and NAMES
+        fb_time_ds = fb_ds_map.get('TIME')
+        fb_names_ds = fb_ds_map.get('NAMES')
+        if not fb_time_ds or fb_time_ds not in fb_grp:
+            return 0.0
+        if not fb_names_ds or fb_names_ds not in fb_grp:
+            return 0.0
+
+        # Find the signal index by name in the fallback group
+        fb_names = [
+            n.decode("utf-8").strip() if isinstance(n, bytes) else str(n).strip()
+            for n in fb_grp[fb_names_ds][:]
+        ]
+        try:
+            fb_idx = fb_names.index(signal_name)
+        except ValueError:
+            return 0.0
+
+        return float(fb_grp[fb_time_ds][fb_idx])
 
     def load_signal_by_name(self, group_name: str, signal_name: str) -> Tuple[np.ndarray, np.ndarray]:
         """Load signal by name instead of index."""

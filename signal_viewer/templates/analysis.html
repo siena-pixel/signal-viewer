@@ -650,7 +650,12 @@ document.addEventListener('DOMContentLoaded', async () => {
   if (GlobalNav._ready) await GlobalNav._ready;
 
   GlobalNav.onSidebarSignalClick = (batch, idx, name, units) => {
-    loadAnalysis(batch, idx, name, units);
+    // Toggle: if same signal already selected, deselect it
+    if (currentSignal.batch === batch && currentSignal.idx === idx) {
+      clearAnalysis();
+    } else {
+      loadAnalysis(batch, idx, name, units);
+    }
   };
 
   GlobalNav.onSelectionChange = clearAnalysis;
