@@ -70,10 +70,15 @@ class HDF5Schema:
                  excluded (treated as invalid).
 
       Optional dataset keys (graceful fallback when absent):
-        TIME              — epoch ms per signal    [default: see TIME_FALLBACK]
-        TIME_FALLBACK     — (config only, not an HDF5 dataset) name of another
-                            group to borrow TIME from when TIME is absent.
-                            Match is by signal name.  Set per group or omit.
+        TIME          — epoch ms per signal        [default: see TIME_FALLBACK]
+        TIME_FALLBACK — (config only, not an HDF5 dataset)  4-tuple that tells
+                        the reader where to find the initial time reference
+                        when TIME is absent for this group:
+                          (group, labels_dataset, values_dataset, time_label)
+                        The reader finds time_label in labels_dataset and reads
+                        the scalar at that index from values_dataset.  The
+                        recovered scalar applies to ALL signals in this group.
+                        Omit to default to t0 = 0.0.
         SAMPLING_FREQ — Hz per signal              [default: parsed from VALUE
                         dataset name suffix, e.g. _0050 → 50 Hz, else 1.0]
         NSAMPLE       — valid sample count         [default: full N from VALUE]
@@ -117,10 +122,12 @@ class HDF5Schema:
     # Group names are derived automatically: list(GROUP_DS_NAMES.keys()).
 
     # -- TIME fallback --------------------------------------------------------
-    # When TIME is missing for a group, the reader tries to borrow the time
-    # value from a signal with the same name in the group specified by
-    # TIME_FALLBACK (a per-group config key, not an HDF5 dataset).
-    # Omit or set to None to disable (defaults to t0 = 0.0).
+    # When TIME is missing for a group, TIME_FALLBACK tells the reader
+    # exactly where to look:
+    #   TIME_FALLBACK = (group, labels_dataset, values_dataset, time_label)
+    # The reader finds time_label in labels_dataset and reads the scalar
+    # at that index from values_dataset.  The value applies to ALL signals
+    # in the group.  Omit to default to t0 = 0.0.
     GROUP_DS_NAMES = {
         'GROUP_T0': {
             'VALUE':         'GROUP_T0_V',
@@ -130,7 +137,7 @@ class HDF5Schema:
             'NAMES':         'GROUP_T0_N',
             'UNITS':         'GROUP_T0_UNI',
             # Type A — no ERROR/SQI/TLS
-            # 'TIME_FALLBACK': 'GROUP_T1',  # example: borrow TIME from GROUP_T1
+            # 'TIME_FALLBACK': ('GROUP_T1', 'GROUP_T1_N', 'GROUP_T1_TIM', 'some_label'),
         },
         'GROUP_T1': {
             'VALUE':         'GROUP_T1_V',
@@ -143,7 +150,7 @@ class HDF5Schema:
             'ERROR':         'GROUP_T1_ERR',
             'SQI':           'GROUP_T1_SQI',
             'TLS':           'GROUP_T1_TLS',
-            # 'TIME_FALLBACK': 'GROUP_T0',  # example: borrow TIME from GROUP_T0
+            # 'TIME_FALLBACK': ('GROUP_T0', 'GROUP_T0_N', 'GROUP_T0_TIM', 'some_label'),
         },
     }
 

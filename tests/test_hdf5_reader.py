@@ -848,17 +848,17 @@ class TestMinimalGroup(unittest.TestCase):
 
 
 class TestTimeFallback(unittest.TestCase):
-    """Per-group TIME_FALLBACK — borrow t0 from same-named signal in another group."""
+    """Per-group TIME_FALLBACK — 4-tuple (group, labels_ds, values_ds, time_label)."""
 
     def test_fallback_provides_time(self):
-        """Signal in group without TIME gets t0 from its TIME_FALLBACK group."""
+        """Group without TIME gets scalar t0 from TIME_FALLBACK 4-tuple."""
         rng = np.random.RandomState(99)
         names = S.group_names()
         if len(names) < 2:
             self.skipTest("Need at least 2 configured groups")
 
-        gn_fb = names[0]   # fallback group (has TIME)
-        gn_target = names[1]  # target group (no TIME, TIME_FALLBACK → gn_fb)
+        gn_fb = names[0]   # fallback group (has labels + values datasets)
+        gn_target = names[1]  # target group (no TIME)
         ds_fb = S.GROUP_DS_NAMES[gn_fb]
         ds_target = S.GROUP_DS_NAMES[gn_target]
 
@@ -877,18 +877,24 @@ class TestTimeFallback(unittest.TestCase):
             },
         }
 
+        # 4-tuple: look up "alpha" in gn_fb's NAMES, read from gn_fb's TIME
+        fb_tuple = (gn_fb, ds_fb['NAMES'], ds_fb['TIME'], 'alpha')
+
         with tempfile.TemporaryDirectory() as tmpdir:
             reader = _make_reader_with_mock(groups, tmpdir)
-            # Inject TIME_FALLBACK into the target group's config
             with patch.dict(S.GROUP_DS_NAMES[gn_target],
-                            {'TIME_FALLBACK': gn_fb}):
-                time, sig = reader.load_signal(gn_target, 0)
-                # t0 should come from gn_fb's TIME for "alpha" → 1000.0
+                            {'TIME_FALLBACK': fb_tuple}):
+                # Both signals get the same scalar t0 = 1000.0
+                time_0, _ = reader.load_signal(gn_target, 0)
                 expected = 1000.0 + np.arange(80, dtype=np.float64) * (1000.0 / 50.0)
-                np.testing.assert_allclose(time, expected, rtol=1e-12)
+                np.testing.assert_allclose(time_0, expected, rtol=1e-12)
 
-    def test_fallback_name_not_found_defaults_zero(self):
-        """If signal name not in fallback group, t0 = 0.0."""
+                reader._metadata_cache.clear()
+                time_1, _ = reader.load_signal(gn_target, 1)
+                np.testing.assert_allclose(time_1, expected, rtol=1e-12)
+
+    def test_fallback_label_not_found_defaults_zero(self):
+        """If time_label not in fallback labels_dataset, t0 = 0.0."""
         rng = np.random.RandomState(99)
         names = S.group_names()
         if len(names) < 2:
@@ -913,12 +919,14 @@ class TestTimeFallback(unittest.TestCase):
             },
         }
 
+        # time_label "nonexistent" won't be found → t0 = 0.0
+        fb_tuple = (gn_fb, ds_fb['NAMES'], ds_fb['TIME'], 'nonexistent')
+
         with tempfile.TemporaryDirectory() as tmpdir:
             reader = _make_reader_with_mock(groups, tmpdir)
             with patch.dict(S.GROUP_DS_NAMES[gn_target],
-                            {'TIME_FALLBACK': gn_fb}):
+                            {'TIME_FALLBACK': fb_tuple}):
                 time, sig = reader.load_signal(gn_target, 0)
-                # "gamma" not in fallback → t0 = 0.0
                 expected = np.arange(60, dtype=np.float64) * (1000.0 / 25.0)
                 np.testing.assert_allclose(time, expected, rtol=1e-12)
 
@@ -942,7 +950,7 @@ class TestTimeFallback(unittest.TestCase):
             np.testing.assert_allclose(time, expected, rtol=1e-12)
 
     def test_each_group_can_have_different_fallback(self):
-        """Two groups with different TIME_FALLBACK targets."""
+        """Two groups with different TIME_FALLBACK targets and labels."""
         rng = np.random.RandomState(99)
         names = S.group_names()
         if len(names) < 2:
@@ -968,14 +976,14 @@ class TestTimeFallback(unittest.TestCase):
             },
         }
 
-        # Custom groups that use each other as fallback
+        # GRP_C falls back to gn_a looking for "sig1"; GRP_D to gn_b for "sig1"
         custom_c = {
             'VALUE': 'C_V', 'NAMES': 'C_N', 'SAMPLING_FREQ': 'C_F',
-            'TIME_FALLBACK': gn_a,
+            'TIME_FALLBACK': (gn_a, ds_a['NAMES'], ds_a['TIME'], 'sig1'),
         }
         custom_d = {
             'VALUE': 'D_V', 'NAMES': 'D_N', 'SAMPLING_FREQ': 'D_F',
-            'TIME_FALLBACK': gn_b,
+            'TIME_FALLBACK': (gn_b, ds_b['NAMES'], ds_b['TIME'], 'sig1'),
         }
         groups['GRP_C'] = {
             'C_V': rng.randn(1, 30).astype(np.float64),
@@ -1003,6 +1011,45 @@ class TestTimeFallback(unittest.TestCase):
                 time_d, _ = reader.load_signal('GRP_D', 0)
                 expected_d = 200.0 + np.arange(30, dtype=np.float64) * (1000.0 / 20.0)
                 np.testing.assert_allclose(time_d, expected_d, rtol=1e-12)
+
+    def test_scalar_applies_to_all_signals(self):
+        """The fallback scalar t0 is the same for every signal in the group."""
+        rng = np.random.RandomState(99)
+        names = S.group_names()
+        if len(names) < 2:
+            self.skipTest("Need at least 2 configured groups")
+
+        gn_fb = names[0]
+        gn_target = names[1]
+        ds_fb = S.GROUP_DS_NAMES[gn_fb]
+        ds_target = S.GROUP_DS_NAMES[gn_target]
+
+        groups = {
+            gn_fb: {
+                ds_fb['VALUE']: rng.randn(3, 50).astype(np.float64),
+                ds_fb['NAMES']: np.array(["x", "y", "z"], dtype=object),
+                ds_fb['TIME']: np.array([111.0, 222.0, 333.0]),
+                ds_fb['SAMPLING_FREQ']: np.array([10.0, 10.0, 10.0]),
+            },
+            gn_target: {
+                ds_target['VALUE']: rng.randn(3, 40).astype(np.float64),
+                ds_target['NAMES']: np.array(["a", "b", "c"], dtype=object),
+                ds_target['SAMPLING_FREQ']: np.array([20.0, 20.0, 20.0]),
+            },
+        }
+
+        # time_label "y" → index 1 → value 222.0 for ALL signals in target
+        fb_tuple = (gn_fb, ds_fb['NAMES'], ds_fb['TIME'], 'y')
+
+        with tempfile.TemporaryDirectory() as tmpdir:
+            reader = _make_reader_with_mock(groups, tmpdir)
+            with patch.dict(S.GROUP_DS_NAMES[gn_target],
+                            {'TIME_FALLBACK': fb_tuple}):
+                expected_t0 = 222.0
+                for idx in range(3):
+                    reader._metadata_cache.clear()
+                    time_arr, _ = reader.load_signal(gn_target, idx)
+                    self.assertAlmostEqual(time_arr[0], expected_t0, places=6)
 
 
 class TestParseFreqFromName(unittest.TestCase):

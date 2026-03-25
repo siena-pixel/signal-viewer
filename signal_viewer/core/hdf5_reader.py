@@ -13,8 +13,9 @@ Required datasets (group is invalid without these):
 
 Optional datasets (graceful fallback when absent):
   NSAMPLE       – missing → use full sample count from VALUE shape
-  TIME          – missing → cross-group fallback via per-group TIME_FALLBACK
-                             config key, else t0 = 0.0
+  TIME          – missing → scalar fallback via per-group TIME_FALLBACK
+                             4-tuple (group, labels_ds, values_ds, time_label),
+                             else t0 = 0.0
   SAMPLING_FREQ – missing → parse Hz from VALUE dataset name suffix
                              (e.g. _0050 → 50 Hz), else 1.0 Hz
   UNITS         – missing → empty strings
@@ -397,9 +398,8 @@ class HDF5Reader:
         time = t0 + arange(n) * (1000.0 / fs)
 
         Fallbacks:
-          TIME          missing → cross-group fallback via per-group
-                                  TIME_FALLBACK key (match by signal name),
-                                  else t0 = 0.0
+          TIME          missing → scalar fallback via per-group
+                                  TIME_FALLBACK 4-tuple, else t0 = 0.0
           SAMPLING_FREQ missing → parsed from VALUE name suffix, else 1.0 Hz
 
         Returns:
@@ -424,11 +424,8 @@ class HDF5Reader:
                 if ds_time and ds_time in group:
                     t0 = float(group[ds_time][signal_index])
                 else:
-                    # Cross-group fallback: look up same signal name in
-                    # the configured TIME_FALLBACK_GROUP
-                    t0 = self._time_fallback(
-                        f, group_name, metadata["signal_names"][signal_index]
-                    )
+                    # Fallback: a single scalar t0 for all signals in this group
+                    t0 = self._time_fallback(f, group_name)
 
                 # SAMPLING_FREQ — optional: parse from VALUE name, else 1.0
                 ds_freq = ds_map.get('SAMPLING_FREQ')
@@ -441,45 +438,44 @@ class HDF5Reader:
         time_data = t0 + np.arange(n, dtype=np.float64) * (1000.0 / fs)
         return time_data, signal_data
 
-    def _time_fallback(self, f, source_group: str, signal_name: str) -> float:
-        """Resolve t0 via per-group TIME_FALLBACK for a signal by name.
+    def _time_fallback(self, f, source_group: str) -> float:
+        """Resolve a scalar t0 via the per-group TIME_FALLBACK 4-tuple.
 
-        If the source group's config contains a TIME_FALLBACK key pointing
-        to another group that is present in the file and contains a signal
-        with the same name, return that group's TIME value.
-        Otherwise return 0.0.
+        TIME_FALLBACK is a config-only key (not an HDF5 dataset) defined as:
+            (group, labels_dataset, values_dataset, time_label)
+
+        The reader opens *group* in the file, finds *time_label* in
+        *labels_dataset*, and reads the scalar at that index from
+        *values_dataset*.  That single value becomes t0 for **all** signals
+        in *source_group*.
+
+        Returns 0.0 when TIME_FALLBACK is not configured, the referenced group
+        or datasets are missing, or *time_label* is not found.
         """
-        fb_group = S.GROUP_DS_NAMES[source_group].get('TIME_FALLBACK')
-        if not fb_group or fb_group == source_group:
-            return 0.0
-        if fb_group not in S.GROUP_DS_NAMES:
+        fb_cfg = S.GROUP_DS_NAMES[source_group].get('TIME_FALLBACK')
+        if not fb_cfg:
             return 0.0
 
-        fb_ds_map = S.GROUP_DS_NAMES[fb_group]
+        fb_group, fb_labels_ds, fb_values_ds, time_label = fb_cfg
+
         if fb_group not in f:
             return 0.0
+        grp = f[fb_group]
 
-        fb_grp = f[fb_group]
-
-        # Check the fallback group has TIME and NAMES
-        fb_time_ds = fb_ds_map.get('TIME')
-        fb_names_ds = fb_ds_map.get('NAMES')
-        if not fb_time_ds or fb_time_ds not in fb_grp:
-            return 0.0
-        if not fb_names_ds or fb_names_ds not in fb_grp:
+        if fb_labels_ds not in grp or fb_values_ds not in grp:
             return 0.0
 
-        # Find the signal index by name in the fallback group
-        fb_names = [
+        labels = [
             n.decode("utf-8").strip() if isinstance(n, bytes) else str(n).strip()
-            for n in fb_grp[fb_names_ds][:]
+            for n in grp[fb_labels_ds][:]
         ]
+
         try:
-            fb_idx = fb_names.index(signal_name)
+            idx = labels.index(time_label)
         except ValueError:
             return 0.0
 
-        return float(fb_grp[fb_time_ds][fb_idx])
+        return float(grp[fb_values_ds][idx])
 
     def load_signal_by_name(self, group_name: str, signal_name: str) -> Tuple[np.ndarray, np.ndarray]:
         """Load signal by name instead of index."""
