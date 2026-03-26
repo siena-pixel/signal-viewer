@@ -203,8 +203,18 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; }
   color: var(--color-text-muted);
 }
 
-.form-group select {
+/* -- FilterSelect combobox widget ----------------------------------------- */
+
+.filter-select {
+  position: relative;
+  min-width: 0;
+}
+
+.filter-select input.fs-input {
+  width: 100%;
+  box-sizing: border-box;
   font-size: 0.85rem;
+  height: 28px;              /* fixed height — matches the old <select> */
   padding: 4px var(--spacing-sm);
   padding-right: 28px;
   background-color: var(--color-bg-secondary);
@@ -217,14 +227,68 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; }
   background-repeat: no-repeat;
   background-position: right 8px center;
   transition: border-color 0.2s, box-shadow 0.2s;
+  text-overflow: ellipsis;
+  overflow: hidden;
+  white-space: nowrap;
 }
 
-.form-group select:hover { border-color: var(--color-primary); }
+.filter-select input.fs-input::placeholder {
+  color: var(--color-text-muted);
+}
 
-.form-group select:focus {
+.filter-select input.fs-input:hover { border-color: var(--color-primary); }
+
+.filter-select input.fs-input:focus {
   outline: none;
   border-color: var(--color-primary);
   box-shadow: 0 0 0 3px var(--color-primary-ring);
+  cursor: text;
+}
+
+.filter-select.fs-disabled input.fs-input {
+  opacity: 0.5;
+  pointer-events: none;
+}
+
+/* Dropdown portal — appended to <body>, positioned with JS via fixed coords */
+.fs-dropdown {
+  display: none;
+  position: fixed;
+  max-height: 260px;
+  overflow-y: auto;
+  background: var(--color-bg-secondary);
+  border: 1px solid var(--color-primary);
+  border-top: none;
+  border-radius: 0 0 var(--radius-sm) var(--radius-sm);
+  z-index: 10000;
+  box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+}
+
+.fs-dropdown .fs-option {
+  padding: 5px var(--spacing-sm);
+  font-size: 0.85rem;
+  cursor: pointer;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--color-text-primary);
+}
+
+.fs-dropdown .fs-option:hover,
+.fs-dropdown .fs-option.fs-highlighted {
+  background: var(--color-primary-subtle);
+}
+
+.fs-dropdown .fs-option.fs-selected {
+  font-weight: 600;
+  color: var(--color-primary);
+}
+
+.fs-dropdown .fs-no-match {
+  padding: 5px var(--spacing-sm);
+  font-size: 0.82rem;
+  color: var(--color-text-muted);
+  font-style: italic;
 }
 
 

@@ -345,7 +345,243 @@ const URLState = {
 };
 
 // ============================================================================
-// 7. GLOBAL NAVIGATION
+// 7. FILTERABLE SELECT WIDGET
+// ============================================================================
+
+/**
+ * FilterSelect — a lightweight combobox that turns a <div class="filter-select">
+ * into a filterable dropdown.  Type to filter, arrow-keys + Enter to navigate,
+ * Escape to close.  Fully replaces native <select> elements.
+ *
+ * Usage:
+ *   const fs = new FilterSelect(containerEl, { onChange: (value, label) => {} });
+ *   fs.setItems([{ value: 'a', label: 'Alpha' }]);
+ *   fs.setValue('a');
+ *   fs.setDisabled(true);
+ */
+class FilterSelect {
+  constructor(containerEl, opts = {}) {
+    this._el = containerEl;
+    this._onChange = opts.onChange || null;
+    this._placeholder = containerEl.dataset.placeholder || 'Select\u2026';
+    this._items = [];       // [{ value, label }]
+    this._value = '';       // current selected value
+    this._hlIdx = -1;       // highlighted index in filtered list
+    this._filtered = [];    // currently visible items after filter
+    this._open = false;
+
+    // Build DOM — input lives inside the container
+    this._input = document.createElement('input');
+    this._input.type = 'text';
+    this._input.className = 'fs-input';
+    this._input.placeholder = this._placeholder;
+    this._input.autocomplete = 'off';
+    this._input.spellcheck = false;
+    this._el.appendChild(this._input);
+
+    // Dropdown lives on <body> so it is never clipped by overflow:hidden
+    this._dropdown = document.createElement('div');
+    this._dropdown.className = 'fs-dropdown';
+    document.body.appendChild(this._dropdown);
+
+    // Events
+    this._input.addEventListener('focus', () => this._openDropdown());
+    this._input.addEventListener('input', () => this._onInput());
+    this._input.addEventListener('keydown', (e) => this._onKeydown(e));
+
+    // Close on outside click — check both container and portal dropdown
+    document.addEventListener('mousedown', (e) => {
+      if (!this._el.contains(e.target) && !this._dropdown.contains(e.target)) {
+        this._closeDropdown(true);
+      }
+    });
+
+    this.setDisabled(true);
+  }
+
+  /* ── Public API ─────────────────────────────────────────────────────── */
+
+  /** Replace the list of items. Items: [{ value, label }] or [string]. */
+  setItems(items) {
+    this._items = items.map(it =>
+      typeof it === 'string' ? { value: it, label: it } : it
+    );
+    this._filtered = this._items.slice();
+    this._value = '';
+    this._input.value = '';
+    this._input.placeholder = this._placeholder;
+  }
+
+  /** Programmatically select a value (no onChange fired). */
+  setValue(val) {
+    const item = this._items.find(it => it.value === val);
+    this._value = val;
+    this._input.value = item ? item.label : '';
+  }
+
+  /** Get current selected value. */
+  getValue() { return this._value; }
+
+  /** Enable / disable the widget. */
+  setDisabled(flag) {
+    if (flag) {
+      this._el.classList.add('fs-disabled');
+      this._input.disabled = true;
+      this._closeDropdown(false);
+    } else {
+      this._el.classList.remove('fs-disabled');
+      this._input.disabled = false;
+    }
+  }
+
+  /** Reset to empty placeholder state. */
+  reset(placeholder) {
+    if (placeholder) this._placeholder = placeholder;
+    this._items = [];
+    this._filtered = [];
+    this._value = '';
+    this._input.value = '';
+    this._input.placeholder = this._placeholder;
+    this._dropdown.innerHTML = '';
+    this.setDisabled(true);
+  }
+
+  /* ── Internal ───────────────────────────────────────────────────────── */
+
+  /** Position the portal dropdown directly below the input using fixed coords. */
+  _positionDropdown() {
+    const rect = this._input.getBoundingClientRect();
+    this._dropdown.style.position = 'fixed';
+    this._dropdown.style.top = rect.bottom + 'px';
+    this._dropdown.style.left = rect.left + 'px';
+    this._dropdown.style.width = rect.width + 'px';
+  }
+
+  _openDropdown() {
+    if (this._open) return;
+    this._open = true;
+    // Select existing text so the user can start typing immediately
+    this._input.select();
+    this._filtered = this._items.slice();
+    this._hlIdx = this._items.findIndex(it => it.value === this._value);
+    this._renderDropdown();
+    this._positionDropdown();
+    this._dropdown.style.display = 'block';
+    this._scrollToHighlighted();
+  }
+
+  _closeDropdown(restoreValue) {
+    if (!this._open) return;
+    this._open = false;
+    this._dropdown.style.display = 'none';
+    if (restoreValue) {
+      const item = this._items.find(it => it.value === this._value);
+      this._input.value = item ? item.label : '';
+    }
+  }
+
+  _onInput() {
+    const q = this._input.value.toLowerCase().trim();
+    this._filtered = q
+      ? this._items.filter(it => it.label.toLowerCase().includes(q))
+      : this._items.slice();
+    this._hlIdx = this._filtered.length > 0 ? 0 : -1;
+    this._renderDropdown();
+    this._positionDropdown();
+  }
+
+  _onKeydown(e) {
+    if (!this._open) {
+      if (e.key === 'ArrowDown' || e.key === 'ArrowUp' || e.key === 'Enter') {
+        e.preventDefault();
+        this._openDropdown();
+      }
+      return;
+    }
+
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        if (this._hlIdx < this._filtered.length - 1) this._hlIdx++;
+        this._updateHighlight();
+        this._scrollToHighlighted();
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        if (this._hlIdx > 0) this._hlIdx--;
+        this._updateHighlight();
+        this._scrollToHighlighted();
+        break;
+      case 'Enter':
+        e.preventDefault();
+        if (this._hlIdx >= 0 && this._hlIdx < this._filtered.length) {
+          this._selectItem(this._filtered[this._hlIdx]);
+        }
+        break;
+      case 'Escape':
+        e.preventDefault();
+        this._closeDropdown(true);
+        this._input.blur();
+        break;
+      case 'Tab':
+        this._closeDropdown(true);
+        break;
+    }
+  }
+
+  _selectItem(item) {
+    const changed = this._value !== item.value;
+    this._value = item.value;
+    this._input.value = item.label;
+    this._closeDropdown(false);
+    this._input.blur();
+    if (changed && this._onChange) this._onChange(item.value, item.label);
+  }
+
+  _renderDropdown() {
+    this._dropdown.innerHTML = '';
+    if (this._filtered.length === 0) {
+      const el = document.createElement('div');
+      el.className = 'fs-no-match';
+      el.textContent = 'No matches';
+      this._dropdown.appendChild(el);
+      return;
+    }
+    this._filtered.forEach((item, i) => {
+      const el = document.createElement('div');
+      el.className = 'fs-option';
+      if (item.value === this._value) el.classList.add('fs-selected');
+      if (i === this._hlIdx) el.classList.add('fs-highlighted');
+      el.textContent = item.label;
+      el.addEventListener('mousedown', (e) => {
+        e.preventDefault();  // keep focus on input
+        this._selectItem(item);
+      });
+      el.addEventListener('mouseenter', () => {
+        this._hlIdx = i;
+        this._updateHighlight();
+      });
+      this._dropdown.appendChild(el);
+    });
+  }
+
+  _updateHighlight() {
+    const children = this._dropdown.querySelectorAll('.fs-option');
+    children.forEach((el, i) => {
+      el.classList.toggle('fs-highlighted', i === this._hlIdx);
+    });
+  }
+
+  _scrollToHighlighted() {
+    const highlighted = this._dropdown.querySelector('.fs-highlighted');
+    if (highlighted) {
+      highlighted.scrollIntoView({ block: 'nearest' });
+    }
+  }
+}
+
+// ============================================================================
+// 8. GLOBAL NAVIGATION
 // ============================================================================
 
 const GlobalNav = {
@@ -369,26 +605,32 @@ const GlobalNav = {
   _steps: {},
   _files: {},
 
-  // DOM references (set in init)
-  _rootEl: null,
-  _serialEl: null,
-  _stepEl: null,
-  _fileEl: null,
+  // FilterSelect widget instances (set in init)
+  _rootFs: null,
+  _serialFs: null,
+  _stepFs: null,
+  _fileFs: null,
   _sidebarEl: null,
 
   // ── Initialisation ──────────────────────────────────────────────────────
 
   async init() {
-    this._rootEl    = document.getElementById('globalRoot');
-    this._serialEl  = document.getElementById('globalSerial');
-    this._stepEl    = document.getElementById('globalStep');
-    this._fileEl    = document.getElementById('globalFile');
+    const rootDiv   = document.getElementById('globalRoot');
+    const serialDiv = document.getElementById('globalSerial');
+    const stepDiv   = document.getElementById('globalStep');
+    const fileDiv   = document.getElementById('globalFile');
     this._sidebarEl = document.getElementById('sidebarContent');
 
-    if (!this._rootEl || !this._serialEl || !this._stepEl || !this._fileEl) {
+    if (!rootDiv || !serialDiv || !stepDiv || !fileDiv) {
       // Page without file selector (e.g. docs)
       return;
     }
+
+    // Create FilterSelect widgets with cascade onChange handlers
+    this._rootFs   = new FilterSelect(rootDiv,   { onChange: (v) => this.onRootChange(v) });
+    this._serialFs = new FilterSelect(serialDiv, { onChange: (v) => this.onSerialChange(v) });
+    this._stepFs   = new FilterSelect(stepDiv,   { onChange: (v) => this.onStepChange(v) });
+    this._fileFs   = new FilterSelect(fileDiv,   { onChange: (v) => this.onFileChange(v) });
 
     // Persist sidebar scroll position on scroll (debounced)
     if (this._sidebarEl) {
@@ -407,25 +649,21 @@ const GlobalNav = {
       const rootData = await apiFetch('/api/roots');
       this._roots = rootData.roots || [];
 
-      this._rootEl.innerHTML = '<option value="">Select root\u2026</option>';
-      this._roots.forEach(r => {
-        const o = document.createElement('option');
-        o.value = r; o.textContent = r;
-        this._rootEl.appendChild(o);
-      });
+      this._rootFs.setItems(this._roots);
+      this._rootFs.setDisabled(false);
 
       // Auto-select if only one root
       if (this._roots.length === 1) {
         this.root = this._roots[0];
-        this._rootEl.value = this._roots[0];
+        this._rootFs.setValue(this._roots[0]);
         // Pre-load serials for the single root
         const data = await apiFetch(`/api/roots/${encodeURIComponent(this.root)}/serials`);
         this._serials[this.root] = data.serials || [];
-        this._populateSelect(this._serialEl, this._serials[this.root], 'Select serial\u2026');
+        this._serialFs.setItems(this._serials[this.root]);
+        this._serialFs.setDisabled(false);
       }
 
       // Restore file-selector state (root/serial/step/file dropdowns + sidebar)
-      // Pages call their own restorePageState() after this promise resolves
       const saved = URLState.load();
       if (saved) await this._restoreState(saved);
 
@@ -443,42 +681,47 @@ const GlobalNav = {
     if (!saved.root || !this._roots.includes(saved.root)) return;
 
     this.root = saved.root;
-    this._rootEl.value = saved.root;
+    this._rootFs.setValue(saved.root);
 
     // Load serials for this root (if not already loaded during auto-select)
     if (!this._serials[saved.root]) {
       const data = await apiFetch(`/api/roots/${encodeURIComponent(saved.root)}/serials`);
       this._serials[saved.root] = data.serials || [];
-      this._populateSelect(this._serialEl, this._serials[saved.root], 'Select serial\u2026');
+      this._serialFs.setItems(this._serials[saved.root]);
+      this._serialFs.setDisabled(false);
     }
 
     if (!saved.serial || !this._serials[saved.root].includes(saved.serial)) return;
 
     this.serial = saved.serial;
-    this._serialEl.value = saved.serial;
+    this._serialFs.setValue(saved.serial);
 
     // Load steps
     const stepsData = await apiFetch(
       `/api/roots/${encodeURIComponent(this.root)}/serials/${encodeURIComponent(saved.serial)}/steps`
     );
     this._steps[saved.serial] = stepsData.steps || [];
-    this._populateSelect(this._stepEl, this._steps[saved.serial], 'Select step\u2026');
+    this._stepFs.setItems(this._steps[saved.serial].map(s => String(s)));
+    this._stepFs.setDisabled(false);
 
-    // Steps come from API as integers but dropdown values are strings — use loose comparison
+    // Steps come from API as integers but dropdown values are strings
     const savedStep = saved.step;
     const matchedStep = this._steps[saved.serial].find(s => String(s) === String(savedStep));
     if (savedStep == null || matchedStep == null) return;
 
     this.step = String(matchedStep);
-    this._stepEl.value = String(matchedStep);
-    this._stepEl.disabled = false;
+    this._stepFs.setValue(String(matchedStep));
 
-    // Load files — use this.step (normalized string) for both URL and cache key
+    // Load files
     const filesData = await apiFetch(
       `/api/roots/${encodeURIComponent(this.root)}/serials/${encodeURIComponent(saved.serial)}/steps/${encodeURIComponent(this.step)}/files`
     );
     this._files[this.step] = filesData.files || [];
-    this._populateFileSelect(this._files[this.step]);
+    this._fileFs.setItems(this._files[this.step].map(f => ({
+      value: f.path,
+      label: `${f.filename} (${formatBytes(f.size)})`
+    })));
+    this._fileFs.setDisabled(false);
 
     if (!saved.filePath) return;
     const fileObj = this._files[this.step].find(f => f.path === saved.filePath);
@@ -487,8 +730,7 @@ const GlobalNav = {
     this.filePath = saved.filePath;
     this.fileName = saved.fileName || fileObj.filename;
     this.fileSize = saved.fileSize || fileObj.size;
-    this._fileEl.value = saved.filePath;
-    this._fileEl.disabled = false;
+    this._fileFs.setValue(saved.filePath);
 
     // Load sidebar — isolated so errors here don't break dropdown restoration
     try {
@@ -510,10 +752,10 @@ const GlobalNav = {
     ['viewerState', 'analysisState', 'cmpState'].forEach(k => sessionStorage.removeItem(k));
   },
 
-  // ── Dropdown handlers (called from inline onchange in base.html) ──────
+  // ── Dropdown handlers (called by FilterSelect onChange) ────────────────
 
-  async onRootChange() {
-    this.root = this._rootEl.value;
+  async onRootChange(val) {
+    this.root = val || null;
     this._resetFrom('serial');
     this._clearAllPageState();
     if (this.onSelectionChange) this.onSelectionChange();
@@ -527,8 +769,8 @@ const GlobalNav = {
       this._serials[this.root] = data.serials || [];
       hideLoading();
 
-      this._populateSelect(this._serialEl, this._serials[this.root], 'Select serial\u2026');
-      this._serialEl.disabled = false;
+      this._serialFs.setItems(this._serials[this.root]);
+      this._serialFs.setDisabled(false);
       URLState.save();
     } catch (err) {
       hideLoading();
@@ -536,8 +778,8 @@ const GlobalNav = {
     }
   },
 
-  async onSerialChange() {
-    this.serial = this._serialEl.value;
+  async onSerialChange(val) {
+    this.serial = val || null;
     this._resetFrom('step');
     this._clearAllPageState();
     if (this.onSelectionChange) this.onSelectionChange();
@@ -551,8 +793,8 @@ const GlobalNav = {
       this._steps[this.serial] = data.steps || [];
       hideLoading();
 
-      this._populateSelect(this._stepEl, this._steps[this.serial], 'Select step\u2026');
-      this._stepEl.disabled = false;
+      this._stepFs.setItems(this._steps[this.serial].map(s => String(s)));
+      this._stepFs.setDisabled(false);
       URLState.save();
     } catch (err) {
       hideLoading();
@@ -560,8 +802,8 @@ const GlobalNav = {
     }
   },
 
-  async onStepChange() {
-    this.step = this._stepEl.value;
+  async onStepChange(val) {
+    this.step = val || null;
     this._resetFrom('file');
     this._clearAllPageState();
     if (this.onSelectionChange) this.onSelectionChange();
@@ -575,8 +817,11 @@ const GlobalNav = {
       this._files[this.step] = data.files || [];
       hideLoading();
 
-      this._populateFileSelect(this._files[this.step]);
-      this._fileEl.disabled = false;
+      this._fileFs.setItems(this._files[this.step].map(f => ({
+        value: f.path,
+        label: `${f.filename} (${formatBytes(f.size)})`
+      })));
+      this._fileFs.setDisabled(false);
       URLState.save();
     } catch (err) {
       hideLoading();
@@ -584,10 +829,9 @@ const GlobalNav = {
     }
   },
 
-  async onFileChange() {
+  async onFileChange(selectedPath) {
     this._clearAllPageState();
     if (this.onSelectionChange) this.onSelectionChange();
-    const selectedPath = this._fileEl.value;
     if (!selectedPath) {
       this.filePath = null; this.fileName = null; this.fileSize = null;
       this._clearSidebar();
@@ -771,53 +1015,26 @@ const GlobalNav = {
 
   // ── Helpers ─────────────────────────────────────────────────────────────
 
-  _populateSelect(el, items, placeholder) {
-    el.innerHTML = `<option value="">${placeholder}</option>`;
-    items.forEach(item => {
-      const o = document.createElement('option');
-      o.value = item; o.textContent = item;
-      el.appendChild(o);
-    });
-    el.disabled = false;
-  },
-
-  _populateFileSelect(files) {
-    this._fileEl.innerHTML = '<option value="">Select file\u2026</option>';
-    files.forEach(f => {
-      const o = document.createElement('option');
-      o.value = f.path;
-      o.textContent = `${f.filename} (${formatBytes(f.size)})`;
-      this._fileEl.appendChild(o);
-    });
-    this._fileEl.disabled = false;
-  },
-
   _resetFrom(level) {
     if (level === 'serial') {
       this.serial = null;
-      this._serialEl.value = '';
-      this._serialEl.innerHTML = '<option value="">Select serial\u2026</option>';
-      this._serialEl.disabled = true;
+      this._serialFs.reset('Select serial\u2026');
     }
     if (level === 'serial' || level === 'step') {
       this.step = null;
-      this._stepEl.value = '';
-      this._stepEl.innerHTML = '<option value="">Select step\u2026</option>';
-      this._stepEl.disabled = true;
+      this._stepFs.reset('Select step\u2026');
     }
     // Always reset file when resetting serial, step or file
     this.filePath = null;
     this.fileName = null;
     this.fileSize = null;
-    this._fileEl.value = '';
-    this._fileEl.innerHTML = '<option value="">Select file\u2026</option>';
-    this._fileEl.disabled = true;
+    this._fileFs.reset('Select file\u2026');
     this._clearSidebar();
   }
 };
 
 // ============================================================================
-// 8. INITIALISATION
+// 9. INITIALISATION
 // ============================================================================
 
 document.addEventListener('DOMContentLoaded', () => {
@@ -839,7 +1056,7 @@ window.addEventListener('unhandledrejection', () => { hideLoading(); });
 window.addEventListener('error', () => { hideLoading(); });
 
 // ============================================================================
-// 9. DEBUG EXPORTS
+// 10. DEBUG EXPORTS
 // ============================================================================
 
 window.APP = {

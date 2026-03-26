@@ -4,7 +4,7 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{% block title %}Signal Viewer{% endblock %}</title>
-  <link rel="stylesheet" href="/static/css/theme.css?v=31">
+  <link rel="stylesheet" href="/static/css/theme.css?v=32">
   <script src="/static/js/vendor/plotly.min.js"></script>
   {% block extra_head %}{% endblock %}
 </head>
@@ -24,28 +24,20 @@
   {% block file_selector %}
   <div class="file-selector-bar" id="fileSelectorBar">
     <div class="form-group">
-      <label for="globalRoot">Root</label>
-      <select id="globalRoot" onchange="GlobalNav.onRootChange()">
-        <option value="">Select root...</option>
-      </select>
+      <label>Root</label>
+      <div class="filter-select" id="globalRoot" data-placeholder="Select root..."></div>
     </div>
     <div class="form-group">
-      <label for="globalSerial">Serial</label>
-      <select id="globalSerial" onchange="GlobalNav.onSerialChange()" disabled>
-        <option value="">Select serial...</option>
-      </select>
+      <label>Serial</label>
+      <div class="filter-select" id="globalSerial" data-placeholder="Select serial..."></div>
     </div>
     <div class="form-group">
-      <label for="globalStep">Step</label>
-      <select id="globalStep" onchange="GlobalNav.onStepChange()" disabled>
-        <option value="">Select step...</option>
-      </select>
+      <label>Step</label>
+      <div class="filter-select" id="globalStep" data-placeholder="Select step..."></div>
     </div>
     <div class="form-group">
-      <label for="globalFile">File</label>
-      <select id="globalFile" onchange="GlobalNav.onFileChange()" disabled>
-        <option value="">Select file...</option>
-      </select>
+      <label>File</label>
+      <div class="filter-select" id="globalFile" data-placeholder="Select file..."></div>
     </div>
   </div>
   {% endblock %}
@@ -79,7 +71,7 @@
     </main>
   </div>
 
-  <script src="/static/js/app.js?v=31"></script>
+  <script src="/static/js/app.js?v=32"></script>
   <script>
   (function() {
     const path = window.location.pathname;
