@@ -2,156 +2,51 @@
 
 {% block title %}Documentation - Signal Viewer{% endblock %}
 
-{% block file_selector %}{% endblock %}
-
 {% block sidebar %}{% endblock %}
 
 {% block content %}
 <div class="module-content">
 <div class="docs-container">
   <div class="docs-content">
-    <h1>Signal Viewer Documentation</h1>
+    <h1>Signal Viewer User Guide</h1>
 
     <details open>
-      <summary><h2>Getting Started</h2></summary>
-      <h3>Installation</h3>
-      <p>Clone the repository and set up the Python environment:</p>
-      <pre><code>git clone &lt;repo-url&gt;
-cd 03_hdf5_signal_viewer
-bash create_venv.sh
-source venv/bin/activate</code></pre>
-
-      <h3>Generate sample data (optional)</h3>
-      <p>To explore the app without your own data, generate realistic dummy signals:</p>
-      <pre><code>python3 generate_dummy_data.py</code></pre>
-
-      <h3>Start the server</h3>
-      <pre><code>bash run.sh</code></pre>
-      <p>Or manually:</p>
-      <pre><code>source venv/bin/activate
-python3 -m signal_viewer.server.app</code></pre>
-      <p>Open your browser and navigate to <code>http://127.0.0.1:8050</code></p>
-
-      <h3>Using your own data</h3>
-      <p>Place HDF5 files inside the <code>data/</code> directory following the folder structure described in the Data Format section below. Alternatively, point to an external directory:</p>
-      <pre><code>export SIGNAL_VIEWER_DATA_ROOT=/path/to/your/data</code></pre>
-      <p>To configure multiple data root directories, edit the <code>DATA_ROOTS</code> dictionary in <code>signal_viewer/config.py</code>:</p>
-      <pre><code>DATA_ROOTS = {
-    'Default': Path('/path/to/default/data'),
-    'Lab A':   Path('/mnt/lab_a/measurements'),
-    'Lab B':   Path('/mnt/lab_b/measurements'),
-}</code></pre>
-      <p>Each entry appears as a selectable option in the <strong>Root</strong> dropdown. When only one root is configured, it is auto-selected.</p>
-    </details>
-
-    <details>
-      <summary><h2>Data Format</h2></summary>
-      <h3>Directory Structure</h3>
-      <p>Signal Viewer expects HDF5 files in a three-level directory hierarchy:</p>
-      <pre><code>SIGNAL_VIEWER_DATA_ROOT/
-├── SN001/                      # serial (prefix SN*)
-│   ├── p001_motor_test/        # folder_1 (pattern pXXX_*)
-│   │   ├── run_nominal/        # folder_2 (any name)
-│   │   │   └── data.h5
-│   │   └── run_overload/
-│   │       └── data.h5
-│   └── p002_vibration/
-└── SN002/</code></pre>
-
-      <h3>HDF5 Internal Structure</h3>
-      <p>Each <code>.h5</code> file contains one or more groups. The mapping between logical dataset roles and actual HDF5 dataset names is configured per group in <code>signal_viewer/config.py</code> via the <code>GROUP_DS_NAMES</code> dictionary. The default configuration defines:</p>
-
-      <p><strong>GROUP_T0</strong> (Type A &mdash; standard signals):</p>
-      <table style="width:100%; border-collapse:collapse; margin:10px 0;">
-        <thead>
-          <tr style="border-bottom:2px solid var(--color-border); text-align:left;">
-            <th style="padding:6px 10px;">Role</th>
-            <th style="padding:6px 10px;">Dataset name</th>
-            <th style="padding:6px 10px;">Shape</th>
-            <th style="padding:6px 10px;">Required</th>
-            <th style="padding:6px 10px;">Fallback</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr><td style="padding:4px 10px;"><code>VALUE</code></td><td style="padding:4px 10px;"><code>GROUP_T0_V</code></td><td style="padding:4px 10px;">(M, N) float64</td><td style="padding:4px 10px;"><strong>Yes</strong></td><td style="padding:4px 10px;">&mdash;</td></tr>
-          <tr><td style="padding:4px 10px;"><code>NAMES</code></td><td style="padding:4px 10px;"><code>GROUP_T0_N</code></td><td style="padding:4px 10px;">(M,) string</td><td style="padding:4px 10px;">Recommended</td><td style="padding:4px 10px;">Signal_0, Signal_1, &hellip;</td></tr>
-          <tr><td style="padding:4px 10px;"><code>TIME</code></td><td style="padding:4px 10px;"><code>GROUP_T0_TIM</code></td><td style="padding:4px 10px;">(M,) float64</td><td style="padding:4px 10px;">No</td><td style="padding:4px 10px;">0.0 (epoch ms)</td></tr>
-          <tr><td style="padding:4px 10px;"><code>SAMPLING_FREQ</code></td><td style="padding:4px 10px;"><code>GROUP_T0_FRE</code></td><td style="padding:4px 10px;">(M,) float64</td><td style="padding:4px 10px;">No</td><td style="padding:4px 10px;">Parsed from VALUE name (e.g. <code>_0050</code> &rarr; 50&nbsp;Hz), else 1.0</td></tr>
-          <tr><td style="padding:4px 10px;"><code>NSAMPLE</code></td><td style="padding:4px 10px;"><code>GROUP_T0_SAM</code></td><td style="padding:4px 10px;">(M,) int64</td><td style="padding:4px 10px;">No</td><td style="padding:4px 10px;">Full N from VALUE shape</td></tr>
-          <tr><td style="padding:4px 10px;"><code>UNITS</code></td><td style="padding:4px 10px;"><code>GROUP_T0_UNI</code></td><td style="padding:4px 10px;">(M,) string</td><td style="padding:4px 10px;">No</td><td style="padding:4px 10px;">Empty strings</td></tr>
-        </tbody>
-      </table>
-
-      <p><strong>GROUP_T1</strong> (Type B &mdash; extended signals): all of the above, plus:</p>
-      <table style="width:100%; border-collapse:collapse; margin:10px 0;">
-        <thead>
-          <tr style="border-bottom:2px solid var(--color-border); text-align:left;">
-            <th style="padding:6px 10px;">Role</th>
-            <th style="padding:6px 10px;">Dataset name</th>
-            <th style="padding:6px 10px;">Shape</th>
-            <th style="padding:6px 10px;">Description</th>
-          </tr>
-        </thead>
-        <tbody>
-          <tr><td style="padding:4px 10px;"><code>ERROR</code></td><td style="padding:4px 10px;"><code>GROUP_T1_ERR</code></td><td style="padding:4px 10px;">(M, N) float64</td><td style="padding:4px 10px;">Error values per signal</td></tr>
-          <tr><td style="padding:4px 10px;"><code>SQI</code></td><td style="padding:4px 10px;"><code>GROUP_T1_SQI</code></td><td style="padding:4px 10px;">(M,) float64</td><td style="padding:4px 10px;">Signal Quality Index per signal</td></tr>
-          <tr><td style="padding:4px 10px;"><code>TLS</code></td><td style="padding:4px 10px;"><code>GROUP_T1_TLS</code></td><td style="padding:4px 10px;">(M,) float64</td><td style="padding:4px 10px;">Tolerance values per signal</td></tr>
-        </tbody>
-      </table>
-
-      <h3>Signal Types</h3>
-      <p>The reader auto-detects the signal type per group based on whether an <code>ERROR</code> dataset is configured and present:</p>
-      <ul>
-        <li><strong>Type A</strong> (standard): VALUE is the only required dataset. All other datasets degrade gracefully when absent.</li>
-        <li><strong>Type B</strong> (extended): VALUE plus ERROR, SQI, and TLS companion datasets.</li>
-      </ul>
-      <p>Time construction: <code>t0 + arange(n) &times; (1000 / fs)</code> where <code>t0</code> comes from TIME (or 0.0), <code>n</code> from NSAMPLE (or the full sample count from VALUE), and <code>fs</code> from SAMPLING_FREQ (or parsed from the VALUE dataset name suffix, e.g. <code>_0050</code> &rarr; 50&nbsp;Hz, or 1.0&nbsp;Hz).</p>
-      <p>Groups where VALUE is missing or empty (0 signals or 0 samples) are silently ignored. Supported file extension: <code>.h5</code>.</p>
-
-      <h3>Customizing the schema</h3>
-      <p>To adapt the viewer to your own HDF5 naming convention, edit the <code>GROUP_DS_NAMES</code> dictionary in <code>signal_viewer/config.py</code>. Each entry maps a group name to a dictionary of logical keys &rarr; actual dataset names. You can add more groups, rename datasets, or mark a group as Type B by including an <code>ERROR</code> key:</p>
-      <pre><code>GROUP_DS_NAMES = {
-    'MY_GROUP': {
-        'VALUE':         'my_values',
-        'TIME':          'my_timestamps',
-        'SAMPLING_FREQ': 'my_fs',
-        'NSAMPLE':       'my_nsamples',
-        'NAMES':         'my_signal_names',
-        'UNITS':         'my_units',
-        # Add these for Type B:
-        # 'ERROR': 'my_errors',
-        # 'SQI':   'my_sqi',
-        # 'TLS':   'my_tls',
-    },
-}</code></pre>
-    </details>
-
-    <details>
       <summary><h2>Navigation</h2></summary>
-      <h3>File Selection</h3>
-      <p>The navigation bar at the top provides four cascading dropdowns:</p>
+      <h3>File Selection Bar</h3>
+      <p>The topmost bar provides four cascading type-to-filter dropdowns for navigating to a specific HDF5 file:</p>
       <ul>
         <li><strong>Root</strong>: Select the data root directory (auto-selected when only one is configured)</li>
         <li><strong>Serial</strong>: Select a test serial or unit identifier (populated after root selection)</li>
         <li><strong>Step</strong>: Choose a test step (populated after serial selection)</li>
-        <li><strong>File</strong>: Select a specific HDF5 file (populated after step selection)</li>
+        <li><strong>File</strong>: Select a specific HDF5 file with its size shown in parentheses (populated after step selection)</li>
       </ul>
+      <p>All four dropdowns support type-to-filter: start typing to narrow the list, use arrow keys to navigate, and Enter to select. Session state (selected root, serial, step, and file) is persisted in <code>sessionStorage</code> so the selection survives page refreshes and tab navigation.</p>
 
-      <h3>Sidebar Navigation</h3>
-      <p>The left sidebar displays available signals from the selected file:</p>
+      <h3>Favourite Heart</h3>
+      <p>A blue heart icon appears next to the File dropdown once a file is selected. Click it to toggle the file as a favourite. Favourited files are stored per user and can be used to filter the file selection via the File Lists combobox.</p>
+
+      <h3>File Lists Filter</h3>
+      <p>The <strong>File Lists</strong> combobox at the far right of the file selection bar filters which files are visible in the cascade. Options include:</p>
       <ul>
-        <li>Click a signal name to load it into the viewer</li>
-        <li>Signals are grouped by batch (e.g. GROUP_T0, GROUP_T1)</li>
-        <li>Signal names and units come from the HDF5 metadata</li>
+        <li><strong>All files</strong> (default): No filtering; all files are shown at every cascade level.</li>
+        <li><strong>My favs</strong>: Shows only files marked as favourites. The Root, Serial, and Step dropdowns are pruned to only display entries that lead to at least one favourited file.</li>
+        <li><strong>&lt;List name&gt;</strong>: Shows only files belonging to the selected user list. Dropdowns are pruned the same way.</li>
       </ul>
+      <p>Changing the File Lists selection resets all cascade dropdowns and clears the current page content.</p>
 
-      <h3>Main Navigation</h3>
-      <p>Top navigation menu links to main sections:</p>
+      <h3>Sidebar</h3>
+      <p>The left sidebar displays available signals from the selected file, grouped by batch (e.g. GROUP_T0, GROUP_T1). Click a batch header to expand or collapse it. Click a signal name to load it into the current page. Signals are sorted alphabetically within each batch. Underscores in signal names are replaced with spaces for readability, and a tooltip shows the original name on hover.</p>
+      <p>The sidebar is resizable: drag the right edge to adjust its width. Both the sidebar width and scroll position are persisted across page navigation.</p>
+
+      <h3>Tab Navigation</h3>
+      <p>The navigation bar below the file selector links to six sections:</p>
       <ul>
-        <li><strong>Viewer</strong>: View and analyze individual signals</li>
-        <li><strong>Analysis</strong>: Statistical analysis and processing</li>
-        <li><strong>Comparison</strong>: Compare multiple signals</li>
-        <li><strong>Docs</strong>: This documentation</li>
+        <li><strong>Viewer</strong>: Interactive signal plotting with adaptive zoom</li>
+        <li><strong>Analysis</strong>: Statistical analysis, histograms, and rainflow cycle counting</li>
+        <li><strong>Comparison</strong>: Side-by-side comparison of two signals</li>
+        <li><strong>Notes</strong>: Private and public notes attached to files</li>
+        <li><strong>Lists</strong>: Create and manage named file lists</li>
+        <li><strong>Docs</strong>: This documentation page</li>
       </ul>
     </details>
 
@@ -165,24 +60,32 @@ python3 -m signal_viewer.server.app</code></pre>
       </ul>
       <p>Switching layout mode while zoomed automatically reloads the full overview data so the signal is always displayed correctly.</p>
 
+      <h3>Time Modes</h3>
+      <p>The <strong>Time</strong> dropdown switches between two x-axis representations:</p>
+      <ul>
+        <li><strong>Absolute</strong>: Time axis shows wall-clock timestamps in <code>h:m:s</code> format derived from the epoch-ms values stored in the HDF5 file.</li>
+        <li><strong>Relative</strong>: Time axis shows elapsed time from the earliest signal start as <code>H:MM:SS</code> (or <code>H:MM:SS.mmm</code> when zoomed to sub-second precision). The origin is the smallest <code>tStart</code> across all loaded signals.</li>
+      </ul>
+      <p>Both modes work correctly with adaptive zoom &mdash; zooming in while in relative mode fetches the correct epoch-ms window from the server and converts back to relative seconds for display.</p>
+
       <h3>Signal Cards</h3>
-      <p>Each loaded signal displays a card in the header bar with:</p>
+      <p>The collapsible <strong>SIGNAL CARDS</strong> section below the controls shows a card for each loaded signal with:</p>
       <ul>
         <li>Batch name and signal name (colour-coded to match the plot trace)</li>
         <li>Live hover readout: value, timestamp, and estimated full-signal sample index</li>
         <li>Point count ratio (displayed points / total samples)</li>
         <li>Remove button (&times;) to unload the signal</li>
       </ul>
+      <p>Click the <strong>SIGNAL CARDS</strong> label to collapse or expand the cards section.</p>
 
       <h3>Adaptive Zoom</h3>
       <p>The viewer uses an adaptive zoom system that re-fetches data from the server at higher resolution whenever you zoom in:</p>
       <ul>
-        <li><strong>Zoom</strong>: Click and drag to select a region. After a short debounce, the server returns up to 5,000 points for just the visible window, giving pixel-level detail at any zoom depth.</li>
+        <li><strong>Zoom</strong>: Click and drag to select a region. After a short debounce, the server returns up to 8,000 points for just the visible window, giving pixel-level detail at any zoom depth.</li>
         <li><strong>Pan</strong>: Hold shift and drag to pan across the signal.</li>
         <li><strong>Reset zoom</strong>: Three ways to return to the full overview &mdash; the house icon (<span style="font-family:monospace">&#x2302;</span>) in the toolbar, the "Reset Zoom" button in the header, or double-clicking the plot.</li>
-        <li><strong>Zoom indicator</strong>: While zoomed, a badge shows what percentage of the full signal is visible, and a "Refining…" label appears briefly while new data loads.</li>
       </ul>
-      <p>The server uses a two-pass MinMax-LTTB downsampling algorithm that preserves visual shape while keeping the point count low. A 5 % margin is fetched beyond the visible edges to avoid low-resolution strips when panning slightly.</p>
+      <p>The server uses a two-pass MinMax-LTTB downsampling algorithm that preserves visual shape while keeping the point count low. Removing a signal while zoomed preserves the current zoom level.</p>
 
       <h3>Hover Crosshair</h3>
       <p>In subplot mode, hovering over any subplot draws a synchronised vertical crosshair across all subplots and updates every signal card with the interpolated value at that time.</p>
@@ -225,191 +128,90 @@ python3 -m signal_viewer.server.app</code></pre>
       <p>Click signals in the sidebar to assign them: first click = Signal A, second click = Signal B. Four comparison views are generated automatically:</p>
 
       <h3>Overlay Comparison</h3>
-      <p>Both signals on the same time axis to compare waveforms directly. Useful for:</p>
-      <ul>
-        <li>Comparing signals from different test conditions</li>
-        <li>Identifying differences in amplitude and phase</li>
-        <li>Visual alignment of features</li>
-      </ul>
+      <p>Both signals on the same time axis to compare waveforms directly. Useful for comparing signals from different test conditions, identifying differences in amplitude and phase, and visual alignment of features.</p>
 
       <h3>X vs Y Correlation</h3>
-      <p>Scatter plot showing the relationship between two signals:</p>
-      <ul>
-        <li>X-axis: First signal values</li>
-        <li>Y-axis: Second signal values</li>
-        <li>Reveals nonlinear relationships and hysteresis</li>
-      </ul>
+      <p>Scatter plot showing the relationship between two signals. The x-axis shows Signal A values, the y-axis shows Signal B values. Reveals nonlinear relationships and hysteresis loops.</p>
 
       <h3>Combined Histogram</h3>
-      <p>Overlay histograms of two signals for distribution comparison:</p>
-      <ul>
-        <li>Side-by-side visualization of value ranges</li>
-        <li>Identify differences in statistical properties</li>
-      </ul>
+      <p>Overlay histograms of two signals for distribution comparison: side-by-side visualization of value ranges and differences in statistical properties.</p>
 
       <h3>Cross-Correlation</h3>
-      <p>Measures similarity and time alignment between signals:</p>
-      <ul>
-        <li>Detects time lags between signals</li>
-        <li>Quantifies correlation strength (-1 to +1)</li>
-        <li>Useful for signal synchronization analysis</li>
-      </ul>
+      <p>Measures similarity and time alignment between signals. Detects time lags, quantifies correlation strength (-1 to +1), and is useful for signal synchronization analysis.</p>
     </details>
 
+    <details>
+      <summary><h2>Notes</h2></summary>
+      <p>The Notes page (accessible via the <strong>Notes</strong> tab) provides per-file annotation with two types of notes, displayed in a two-column layout:</p>
+
+      <h3>Private Notes (left column)</h3>
+      <p>A single private note per file per user. Only visible to the author. The text area is fixed-height (15 lines) with a scroll bar for longer content. Click <strong>Save</strong> to persist; the save date is shown to the right of the button.</p>
+
+      <h3>Public Notes (right column)</h3>
+      <p>Multiple public notes per file, visible to all users. Enter text in the 5-line text area and click <strong>Add Note</strong>. Each note card shows the author name in bold, the date, and the note content. Click the &times; button at the top-right corner of any card to delete it.</p>
+
+      <h3>File Path Header</h3>
+      <p>The full navigation path to the current file (Root / Serial / Step / File) is displayed in the header, so you always know which file the notes belong to.</p>
+    </details>
 
     <details>
-      <summary><h2>API Reference</h2></summary>
-      <h3>Navigation Endpoints</h3>
-      <ul>
-        <li><code>GET /api/serials</code> - List all available serials</li>
-        <li><code>GET /api/serials/{serial}/steps</code> - List steps for a serial</li>
-        <li><code>GET /api/serials/{serial}/steps/{step}/files</code> - List files in a step</li>
-      </ul>
+      <summary><h2>Lists</h2></summary>
+      <p>The Lists page (accessible via the <strong>Lists</strong> tab) lets you organise HDF5 files into named collections. The page is split into two stacked sections:</p>
 
-      <h3>Data Endpoints</h3>
+      <h3>Top Section &mdash; Your Lists</h3>
+      <p>A scrollable container (up to 5 visible items) showing all lists you have access to. Each row displays:</p>
       <ul>
-        <li><code>GET /api/files/{file}/batches</code> - List batches in a file</li>
-        <li><code>GET /api/files/{file}/batches/{batch}/meta</code> - Get batch metadata (signal names, units)</li>
-        <li><code>GET /api/files/{file}/batches/{batch}/signals/{index}</code> - Get signal data.
-          Supports optional query parameters:
-          <ul>
-            <li><code>downsample=N</code> - Target point count (default: full signal, max 10,000). Uses MinMax-LTTB downsampling.</li>
-            <li><code>t_min=&lt;epoch_ms&gt;</code> &amp; <code>t_max=&lt;epoch_ms&gt;</code> - Time window slice. The server binary-searches the cached signal and returns only the matching segment. Combine with <code>downsample</code> for adaptive zoom.</li>
-          </ul>
-          Response includes <code>total_samples</code>, <code>t_start</code>, <code>t_end</code> (full signal extent) and <code>windowed</code> (boolean) alongside the <code>time</code> and <code>values</code> arrays.
-        </li>
+        <li><strong>Name</strong>: The list name (click to select it and view its files below)</li>
+        <li><strong>Creator</strong>: The OS username of the list owner</li>
+        <li><strong>Date</strong>: When the list was created</li>
+        <li><strong>Public/Private toggle</strong>: Controls visibility to other users. Only the list owner can change this; for other users&rsquo; lists the toggle is read-only.</li>
+        <li><strong>Delete button</strong>: Remove the list (owner only)</li>
       </ul>
+      <p><strong>My Favs</strong> always appears as the first entry. It mirrors your favourited files and cannot be deleted or toggled.</p>
+      <p>Use the <strong>New List</strong> button to create a new list.</p>
 
-      <h3>Analysis Endpoints</h3>
+      <h3>Bottom Section &mdash; Files in Selected List</h3>
+      <p>Shows the files belonging to the currently selected list. Each file row displays its full cascade path (Root / Serial / Step / File) and two action buttons:</p>
       <ul>
-        <li><code>POST /api/analysis/stats</code> - Descriptive statistics and rainflow cycle counting</li>
-        <li><code>POST /api/analysis/correlation</code> - Cross-correlation between two signals</li>
-        <li><code>POST /api/analysis/trend</code> - Polynomial trend fitting</li>
+        <li><strong>Show</strong>: Navigates the file selection bar to this file so you can immediately view its signals.</li>
+        <li><strong>Remove</strong>: Removes the file from the list (with a confirmation prompt).</li>
       </ul>
+      <p>Use <strong>Add Current File</strong> to add whatever file is currently selected in the file selection bar.</p>
 
-      <h3>Cache Endpoints</h3>
-      <ul>
-        <li><code>GET /api/cache/stats</code> - Get cache statistics</li>
-        <li><code>POST /api/rescan</code> - Rescan data directory</li>
-      </ul>
+      <h3>Integration with File Lists Filter</h3>
+      <p>Lists created here automatically appear in the <strong>File Lists</strong> combobox in the file selection bar. Selecting a list there filters the cascade dropdowns to only show files belonging to that list.</p>
+    </details>
+
+    <details>
+      <summary><h2>Favourites</h2></summary>
+      <p>Mark any file as a favourite by clicking the blue heart icon in the file selection bar. Favourites are stored per user and persist across sessions.</p>
+      <p>Favourited files can be quickly accessed by selecting <strong>My favs</strong> in the File Lists combobox, which prunes the cascade to show only the roots, serials, and steps that contain at least one favourited file.</p>
     </details>
 
     <details>
       <summary><h2>Keyboard &amp; Mouse Controls</h2></summary>
       <h3>Plot Interactions</h3>
       <ul>
-        <li><strong>Click and drag</strong> - Zoom into selected region (triggers adaptive data reload)</li>
-        <li><strong>Shift + Click and drag</strong> - Pan across the plot</li>
-        <li><strong>Double-click</strong> - Reset to full signal overview</li>
-        <li><strong>House icon (toolbar)</strong> - Reset zoom to full overview</li>
+        <li><strong>Click and drag</strong> &mdash; Zoom into selected region (triggers adaptive data reload)</li>
+        <li><strong>Shift + Click and drag</strong> &mdash; Pan across the plot</li>
+        <li><strong>Double-click</strong> &mdash; Reset to full signal overview</li>
+        <li><strong>House icon (toolbar)</strong> &mdash; Reset zoom to full overview</li>
       </ul>
 
       <h3>Toolbar Buttons</h3>
       <ul>
-        <li><strong>Zoom</strong> / <strong>Pan</strong> - Toggle drag mode</li>
-        <li><strong>Zoom in</strong> / <strong>Zoom out</strong> - Incremental zoom</li>
-        <li><strong>House icon</strong> - Reset zoom (full signal)</li>
-        <li><strong>Camera icon</strong> - Download plot as PNG</li>
+        <li><strong>Zoom</strong> / <strong>Pan</strong> &mdash; Toggle drag mode</li>
+        <li><strong>Zoom in</strong> / <strong>Zoom out</strong> &mdash; Incremental zoom</li>
+        <li><strong>House icon</strong> &mdash; Reset zoom (full signal)</li>
+        <li><strong>Camera icon</strong> &mdash; Download plot as PNG</li>
       </ul>
 
-      <h3>Page Navigation</h3>
+      <h3>Combobox Keyboard</h3>
       <ul>
-        <li><strong>Alt + V</strong> - Go to Viewer (on supported browsers)</li>
-        <li><strong>Alt + A</strong> - Go to Analysis</li>
-        <li><strong>Alt + C</strong> - Go to Comparison</li>
-        <li><strong>Alt + D</strong> - Go to Docs</li>
-      </ul>
-    </details>
-
-    <details>
-      <summary><h2>Configuration</h2></summary>
-      <h3>Environment Variables</h3>
-      <p>Configure the application using environment variables:</p>
-
-      <ul>
-        <li><code>SIGNAL_VIEWER_DATA_ROOT</code> - Root directory containing HDF5 files
-          <br><code>Default: &lt;project&gt;/data/</code></li>
-
-        <li><code>SIGNAL_VIEWER_HOST</code> - Server bind address
-          <br><code>Default: 127.0.0.1</code>
-          <br><code>Usage: export SIGNAL_VIEWER_HOST=0.0.0.0</code></li>
-
-        <li><code>SIGNAL_VIEWER_PORT</code> - Server port number
-          <br><code>Default: 8050</code>
-          <br><code>Usage: export SIGNAL_VIEWER_PORT=9000</code></li>
-
-        <li><code>SIGNAL_VIEWER_DEBUG</code> - Enable debug mode (auto-reload)
-          <br><code>Default: true</code>
-          <br><code>Usage: export SIGNAL_VIEWER_DEBUG=false</code></li>
-
-        <li><code>SIGNAL_VIEWER_VERBOSE</code> - Log detailed tracebacks for every error
-          <br><code>Default: false</code></li>
-
-        <li><code>SIGNAL_VIEWER_CACHE_MB</code> - Signal cache budget in MB
-          <br><code>Default: 500</code>
-          <br><code>Usage: export SIGNAL_VIEWER_CACHE_MB=1024</code></li>
-      </ul>
-
-      <h3>Example Configuration</h3>
-      <pre><code>export SIGNAL_VIEWER_DATA_ROOT=/data/hdf5_signals
-export SIGNAL_VIEWER_HOST=0.0.0.0
-export SIGNAL_VIEWER_PORT=8050
-export SIGNAL_VIEWER_CACHE_MB=1024</code></pre>
-    </details>
-
-    <details>
-      <summary><h2>Troubleshooting</h2></summary>
-      <h3>No Serials Appearing</h3>
-      <p><strong>Problem:</strong> Serial dropdown is empty after server starts.</p>
-      <ul>
-        <li>Verify <code>SIGNAL_VIEWER_DATA_ROOT</code> environment variable is set correctly</li>
-        <li>Check that HDF5 files exist in the data root directory</li>
-        <li>Ensure directory permissions allow reading</li>
-        <li>Check server logs for errors: <code>python -m signal_viewer.server.app</code></li>
-      </ul>
-
-      <h3>Signals Not Loading</h3>
-      <p><strong>Problem:</strong> Selected file shows no signals in sidebar.</p>
-      <ul>
-        <li>Verify HDF5 file structure matches expected format</li>
-        <li>Check that signals are stored as datasets in batch groups</li>
-        <li>Use HDF5 viewer tool (e.g., HDFView) to inspect file structure</li>
-        <li>Check browser console for JavaScript errors (F12)</li>
-      </ul>
-
-      <h3>Out of Memory</h3>
-      <p><strong>Problem:</strong> "Cache limit exceeded" error when loading signals.</p>
-      <ul>
-        <li>Increase <code>SIGNAL_VIEWER_CACHE_MB</code> environment variable</li>
-        <li>Reduce number of loaded signals (max 5)</li>
-        <li>Close browser tabs and restart server</li>
-        <li>Check system memory availability</li>
-      </ul>
-
-      <h3>Slow Performance</h3>
-      <p><strong>Problem:</strong> Application is sluggish or unresponsive.</p>
-      <ul>
-        <li>Reduce number of signals loaded simultaneously</li>
-        <li>Close other applications to free system resources</li>
-        <li>Check CPU usage in system monitor</li>
-        <li>Consider reducing plot update frequency in browser developer tools</li>
-      </ul>
-
-      <h3>Plot Not Updating</h3>
-      <p><strong>Problem:</strong> Plot remains blank or shows old data.</p>
-      <ul>
-        <li>Refresh browser page (Ctrl+R or Cmd+R)</li>
-        <li>Clear browser cache and reload</li>
-        <li>Check browser console for JavaScript errors</li>
-        <li>Verify Plotly library loaded: check network requests in DevTools</li>
-      </ul>
-
-      <h3>CORS Errors</h3>
-      <p><strong>Problem:</strong> Browser console shows CORS errors.</p>
-      <ul>
-        <li>Ensure server is running and accessible</li>
-        <li>Check that <code>SIGNAL_VIEWER_HOST</code> and <code>SIGNAL_VIEWER_PORT</code> match browser location</li>
-        <li>If using reverse proxy, verify CORS headers are set correctly</li>
+        <li><strong>Arrow Down / Arrow Up</strong> &mdash; Open dropdown or move highlight</li>
+        <li><strong>Enter</strong> &mdash; Select highlighted item</li>
+        <li><strong>Escape</strong> &mdash; Close dropdown</li>
+        <li><strong>Type any text</strong> &mdash; Filter items by label</li>
       </ul>
     </details>
 

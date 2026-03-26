@@ -136,12 +136,25 @@ def minmax_lttb_downsample(
     indices[0::2] = np.where(swap, max_idx, min_idx)
     indices[1::2] = np.where(swap, min_idx, max_idx)
 
-    # Handle any leftover samples in the tail
+    # Handle leftover samples in the tail with the SAME bucket density
+    # as the main body.  The old approach used only 2 points for the
+    # entire tail (min + max), which could leave thousands of samples
+    # represented by just one line segment — visible as a flat line at
+    # the end of each signal in the overview.
     if usable < n:
-        tail = s[usable:]
-        tail_min = usable + tail.argmin()
-        tail_max = usable + tail.argmax()
-        indices = np.append(indices, [tail_min, tail_max])
+        tail_indices = []
+        pos = usable
+        while pos < n:
+            end = min(pos + chunk, n)
+            seg = s[pos:end]
+            lo = pos + int(np.argmin(seg))
+            hi = pos + int(np.argmax(seg))
+            tail_indices.append(min(lo, hi))
+            if lo != hi:
+                tail_indices.append(max(lo, hi))
+            pos = end
+        if tail_indices:
+            indices = np.append(indices, tail_indices)
 
     # Deduplicate, sort, ensure first/last are included
     indices = np.unique(indices)

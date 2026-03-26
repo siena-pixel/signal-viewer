@@ -1,0 +1,404 @@
+{% extends "base.html" %}
+
+{% block title %}Lists - Signal Viewer{% endblock %}
+
+{% block content %}
+<div class="module-content lists-page">
+
+  <!-- ── Top section: list of lists ────────────────────────────────── -->
+  <div class="card lists-top-card">
+    <div class="card-header">
+      <h3>My Lists</h3>
+      <button class="btn btn-sm" onclick="createList()">New List</button>
+    </div>
+    <div class="card-body lists-scroll-container" id="listsContainer">
+      <div class="sidebar-empty">Loading…</div>
+    </div>
+  </div>
+
+  <!-- ── Bottom section: files in selected list ────────────────────── -->
+  <div class="card lists-bottom-card">
+    <div class="card-header">
+      <h3 id="listDetailTitle">Select a list</h3>
+      <div id="listDetailActions" style="display:none">
+        <button class="btn btn-sm" id="btnAddCurrentFile" onclick="addCurrentFile()">Add Current File</button>
+      </div>
+    </div>
+    <div class="card-body lists-files-container" id="listFilesContainer">
+      <div class="sidebar-empty">Select a list to view its files</div>
+    </div>
+  </div>
+</div>
+{% endblock %}
+
+{% block extra_js %}
+<script>
+// ============================================================================
+// LISTS MODULE
+// ============================================================================
+
+let _listsFilePath = null;
+let _selectedListId = null;    // numeric id or 'favs'
+let _selectedListName = null;
+let _allLists = [];
+let _currentUser = '';
+/** Pre-resolved cascade coordinates keyed by file path. */
+let _resolvedFiles = {};
+
+const FAVS_ID = 'favs';
+
+// ── Init ──────────────────────────────────────────────────────────────
+
+async function _initLists() {
+  await GlobalNav._ready;
+
+  GlobalNav.onFileSelected = () => {
+    _listsFilePath = GlobalNav.filePath;
+  };
+  GlobalNav.onSelectionChange = () => {
+    _listsFilePath = null;
+  };
+
+  if (GlobalNav.filePath) {
+    _listsFilePath = GlobalNav.filePath;
+  }
+
+  await loadLists();
+  selectList(FAVS_ID, 'My Favs');
+}
+
+// ── Lists CRUD ────────────────────────────────────────────────────────
+
+async function loadLists() {
+  try {
+    const data = await apiFetch('/api/lists');
+    _allLists = data.lists || [];
+    _currentUser = data.current_user || '';
+    renderLists();
+  } catch (err) {
+    showToast(`Failed to load lists: ${err.message}`, 'error');
+  }
+}
+
+function _fmtDate(iso) {
+  if (!iso) return '';
+  try {
+    const d = new Date(iso + 'Z');  // SQLite stores UTC without Z
+    return d.toLocaleDateString(undefined, { year: 'numeric', month: 'short', day: 'numeric' });
+  } catch { return iso; }
+}
+
+function renderLists() {
+  const container = document.getElementById('listsContainer');
+  container.innerHTML = '';
+
+  // ── My Favs (always first, non-deletable) ──────────────────────
+  const favsRow = _buildListRow({
+    id: FAVS_ID,
+    name: '♥ My Favs',
+    user: _currentUser,
+    created_at: null,
+    is_public: 0,
+    _isFavs: true,
+  });
+  container.appendChild(favsRow);
+
+  // ── User-created lists ─────────────────────────────────────────
+  _allLists.forEach(list => container.appendChild(_buildListRow(list)));
+}
+
+function _buildListRow(list) {
+  const isActive = list.id === _selectedListId;
+  const isFavs = !!list._isFavs;
+  const isOwner = isFavs || (list.user === _currentUser);
+
+  const row = document.createElement('div');
+  row.className = 'list-row' + (isActive ? ' active' : '') + (isFavs ? ' favs-row' : '');
+  row.onclick = (e) => {
+    // Don't trigger selection when clicking toggle/delete
+    if (e.target.closest('.list-row-actions')) return;
+    selectList(list.id, isFavs ? 'My Favs' : list.name);
+  };
+
+  // Name
+  const nameSpan = document.createElement('span');
+  nameSpan.className = 'list-row-name';
+  nameSpan.textContent = isFavs ? '♥ My Favs' : list.name;
+  row.appendChild(nameSpan);
+
+  if (isFavs) {
+    // My Favs: only show name — skip creator, date, actions columns
+    return row;
+  }
+
+  // Creator
+  const userSpan = document.createElement('span');
+  userSpan.className = 'list-row-meta';
+  userSpan.textContent = list.user || '';
+  row.appendChild(userSpan);
+
+  // Date
+  const dateSpan = document.createElement('span');
+  dateSpan.className = 'list-row-meta';
+  dateSpan.textContent = _fmtDate(list.created_at);
+  row.appendChild(dateSpan);
+
+  // Actions column (toggle + delete)
+  const actionsDiv = document.createElement('div');
+  actionsDiv.className = 'list-row-actions';
+
+  // Public/private toggle
+  const toggleLabel = document.createElement('label');
+  toggleLabel.className = 'toggle-switch';
+  toggleLabel.title = isOwner ? 'Toggle public/private' : (list.is_public ? 'Public' : 'Private');
+  const toggleInput = document.createElement('input');
+  toggleInput.type = 'checkbox';
+  toggleInput.checked = !!list.is_public;
+  toggleInput.disabled = !isOwner;
+  toggleInput.onchange = () => toggleListPublic(list.id, toggleInput.checked);
+  const toggleSlider = document.createElement('span');
+  toggleSlider.className = 'toggle-slider';
+  const toggleText = document.createElement('span');
+  toggleText.className = 'toggle-label-text';
+  toggleText.textContent = list.is_public ? 'Public' : 'Private';
+  toggleLabel.appendChild(toggleInput);
+  toggleLabel.appendChild(toggleSlider);
+  toggleLabel.appendChild(toggleText);
+  actionsDiv.appendChild(toggleLabel);
+
+  // Delete button (only for owner)
+  if (isOwner) {
+    const delBtn = document.createElement('button');
+    delBtn.className = 'btn btn-sm btn-danger';
+    delBtn.textContent = 'Delete';
+    delBtn.onclick = (e) => { e.stopPropagation(); deleteList(list.id, list.name); };
+    actionsDiv.appendChild(delBtn);
+  }
+
+  row.appendChild(actionsDiv);
+  return row;
+}
+
+async function toggleListPublic(listId, isPublic) {
+  try {
+    await apiFetch('/api/lists', {
+      method: 'PATCH',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ list_id: listId, is_public: isPublic }),
+    });
+    // Reload to refresh toggle labels
+    await loadLists();
+  } catch (err) {
+    showToast(`Failed to update list: ${err.message}`, 'error');
+    await loadLists(); // revert UI
+  }
+}
+
+async function createList() {
+  const name = prompt('Enter list name:');
+  if (!name) return;
+  try {
+    await apiPost('/api/lists', { name });
+    showToast('List created', 'success');
+    await loadLists();
+    if (GlobalNav.refreshFileLists) GlobalNav.refreshFileLists();
+  } catch (err) {
+    showToast(`Failed to create list: ${err.message}`, 'error');
+  }
+}
+
+async function deleteList(listId, listName) {
+  if (!confirm(`Delete list "${listName}"?`)) return;
+  try {
+    await apiFetch(`/api/lists?id=${listId}`, { method: 'DELETE' });
+    showToast('List deleted', 'success');
+    if (_selectedListId === listId) {
+      _selectedListId = FAVS_ID;
+      _selectedListName = 'My Favs';
+      selectList(FAVS_ID, 'My Favs');
+    }
+    await loadLists();
+    if (GlobalNav.refreshFileLists) GlobalNav.refreshFileLists();
+  } catch (err) {
+    showToast(`Failed to delete list: ${err.message}`, 'error');
+  }
+}
+
+// ── File list (bottom section) ────────────────────────────────────────
+
+async function selectList(listId, listName) {
+  _selectedListId = listId;
+  _selectedListName = listName;
+  renderLists();  // update active highlight
+
+  document.getElementById('listDetailTitle').textContent = listName;
+  document.getElementById('listDetailActions').style.display = '';
+
+  try {
+    let filePaths = [];
+    if (listId === FAVS_ID) {
+      const data = await apiFetch('/api/favourites');
+      filePaths = data.paths || [];
+    } else {
+      const data = await apiFetch(`/api/lists/${listId}/files`);
+      filePaths = data.files || [];
+    }
+
+    // Batch-resolve all paths to cascade coordinates
+    _resolvedFiles = {};
+    if (filePaths.length > 0) {
+      try {
+        const res = await apiPost('/api/resolve-path', { paths: filePaths });
+        _resolvedFiles = res.resolved || {};
+      } catch (_) { /* silent — will show raw paths as fallback */ }
+    }
+
+    const container = document.getElementById('listFilesContainer');
+    if (filePaths.length === 0) {
+      container.innerHTML = '<div class="sidebar-empty">No files in this list</div>';
+      return;
+    }
+    container.innerHTML = '';
+
+    filePaths.forEach(fp => {
+      const div = document.createElement('div');
+      div.className = 'list-file-item';
+
+      // Display as cascade chain: root / serial / step / filename
+      const info = _resolvedFiles[fp];
+      let displayText = fp;  // fallback
+      if (info) {
+        displayText = [info.root, info.serial, info.step, info.file.filename]
+          .filter(Boolean).join(' / ');
+      }
+
+      const pathSpan = document.createElement('span');
+      pathSpan.className = 'file-path-full';
+      pathSpan.title = fp;
+      pathSpan.textContent = displayText;
+
+      const actionsDiv = document.createElement('div');
+      actionsDiv.className = 'list-file-actions';
+
+      const showBtn = document.createElement('button');
+      showBtn.className = 'btn btn-sm';
+      showBtn.textContent = 'Show';
+      showBtn.onclick = () => showFile(fp);
+
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'btn btn-sm btn-danger';
+      removeBtn.textContent = 'Remove';
+      removeBtn.onclick = () => removeFileFromList(fp);
+
+      actionsDiv.appendChild(showBtn);
+      actionsDiv.appendChild(removeBtn);
+      div.appendChild(pathSpan);
+      div.appendChild(actionsDiv);
+      container.appendChild(div);
+    });
+  } catch (err) {
+    showToast(`Failed to load list files: ${err.message}`, 'error');
+  }
+}
+
+// ── File actions ──────────────────────────────────────────────────────
+
+async function addCurrentFile() {
+  if (!_listsFilePath) { showToast('Select a file first', 'warning'); return; }
+
+  if (_selectedListId === FAVS_ID) {
+    try {
+      await apiPost(`/api/favourites/${encodePath(_listsFilePath)}`, { active: true });
+      showToast('File added to favourites', 'success');
+      selectList(FAVS_ID, 'My Favs');
+      if (GlobalNav._refreshFavPaths) GlobalNav._refreshFavPaths();
+    } catch (err) {
+      showToast(`Failed to add favourite: ${err.message}`, 'error');
+    }
+    return;
+  }
+
+  if (!_selectedListId) { showToast('Select a list first', 'warning'); return; }
+  try {
+    await apiPost(`/api/lists/${_selectedListId}/files`, { file_path: _listsFilePath });
+    showToast('File added to list', 'success');
+    selectList(_selectedListId, _selectedListName);
+  } catch (err) {
+    showToast(`Failed to add file: ${err.message}`, 'error');
+  }
+}
+
+async function removeFileFromList(filePath) {
+  if (!confirm('Remove this file from the list?')) return;
+
+  if (_selectedListId === FAVS_ID) {
+    try {
+      await apiPost(`/api/favourites/${encodePath(filePath)}`, { active: false });
+      showToast('File removed from favourites', 'success');
+      selectList(FAVS_ID, 'My Favs');
+      if (GlobalNav._refreshFavPaths) GlobalNav._refreshFavPaths();
+    } catch (err) {
+      showToast(`Failed to remove favourite: ${err.message}`, 'error');
+    }
+    return;
+  }
+
+  if (!_selectedListId) return;
+  try {
+    await apiFetch(`/api/lists/${_selectedListId}/files?file=${encodeURIComponent(filePath)}`, {
+      method: 'DELETE',
+    });
+    showToast('File removed', 'success');
+    selectList(_selectedListId, _selectedListName);
+  } catch (err) {
+    showToast(`Failed to remove file: ${err.message}`, 'error');
+  }
+}
+
+/**
+ * Show a file by setting the cascade dropdowns to its resolved coordinates.
+ * Uses pre-resolved data from _resolvedFiles to populate each level sequentially.
+ */
+async function showFile(filePath) {
+  const info = _resolvedFiles[filePath];
+  if (!info) {
+    showToast('Cannot resolve file location', 'error');
+    return;
+  }
+
+  try {
+    const nav = GlobalNav;
+
+    // Reset file list filter to 'all' so the full cascade is available
+    if (nav._fileListFs) {
+      nav._fileListFs.setValue('all');
+      nav._fileListMode = 'all';
+      nav._filteredTree = null;
+    }
+
+    // 1. Set root and load serials
+    nav._rootFs.setValue(info.root);
+    nav.root = info.root;
+    await nav.onRootChange(info.root);
+
+    // 2. Set serial and load steps
+    nav._serialFs.setValue(info.serial);
+    nav.serial = info.serial;
+    await nav.onSerialChange(info.serial);
+
+    // 3. Set step and load files
+    nav._stepFs.setValue(info.step);
+    nav.step = info.step;
+    await nav.onStepChange(info.step);
+
+    // 4. Set file and trigger file selection
+    nav._fileFs.setValue(info.file.path);
+    await nav.onFileChange(info.file.path);
+  } catch (err) {
+    showToast(`Failed to navigate to file: ${err.message}`, 'error');
+  }
+}
+
+document.addEventListener('DOMContentLoaded', _initLists);
+</script>
+{% endblock %}

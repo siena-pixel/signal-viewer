@@ -36,6 +36,12 @@ VERBOSE = os.environ.get('SIGNAL_VIEWER_VERBOSE', 'false').lower() == 'true'
 CACHE_MAX_MEMORY_MB = int(os.environ.get('SIGNAL_VIEWER_CACHE_MB', '500'))
 CACHE_MAX_MEMORY_BYTES = CACHE_MAX_MEMORY_MB * 1024 * 1024
 
+# Database (SQLite .db3 for favourites, comments, lists)
+DATABASE_PATH = Path(os.environ.get(
+    'SIGNAL_VIEWER_DB_PATH',
+    str(PROJECT_ROOT / 'signal_viewer.db3')
+))
+
 # Processing defaults
 DEFAULT_DOWNSAMPLE_POINTS = 5000
 MAX_DOWNSAMPLE_POINTS = 10000

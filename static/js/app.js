@@ -290,6 +290,11 @@ function getSignalColor(index) {
   return SIGNAL_COLORS[index % SIGNAL_COLORS.length];
 }
 
+/** Replace underscores with spaces for display. */
+function displayName(name) {
+  return (name || '').replace(/_/g, ' ');
+}
+
 // ============================================================================
 // 6. URL STATE PERSISTENCE
 // ============================================================================
@@ -410,6 +415,46 @@ class FilterSelect {
     this._value = '';
     this._input.value = '';
     this._input.placeholder = this._placeholder;
+    this._autoSize();
+  }
+
+  /** Measure the widest label and size the container + input accordingly. */
+  _autoSize() {
+    if (!this._items.length) return;
+    // Use a hidden off-screen span with the same font to measure text width
+    let ruler = document.getElementById('_fsRuler');
+    if (!ruler) {
+      ruler = document.createElement('span');
+      ruler.id = '_fsRuler';
+      ruler.style.cssText =
+        'position:absolute;visibility:hidden;white-space:nowrap;pointer-events:none;';
+      document.body.appendChild(ruler);
+    }
+    // Copy font from input
+    const cs = getComputedStyle(this._input);
+    ruler.style.font = cs.font;
+    ruler.style.letterSpacing = cs.letterSpacing;
+
+    let maxW = 0;
+    for (const it of this._items) {
+      ruler.textContent = it.label;
+      if (ruler.offsetWidth > maxW) maxW = ruler.offsetWidth;
+    }
+    // Also consider placeholder width
+    ruler.textContent = this._placeholder;
+    if (ruler.offsetWidth > maxW) maxW = ruler.offsetWidth;
+
+    // Add padding: left pad (8) + right pad for arrow (28) + extra breathing room (16)
+    const pad = 52;
+    const totalW = maxW + pad;
+    // Set width on the container (.form-group) so the flex layout respects it,
+    // and on the input so it actually fills that width.
+    this._input.style.width = totalW + 'px';
+    const formGroup = this._el.closest('.form-group');
+    if (formGroup) {
+      formGroup.style.minWidth = totalW + 'px';
+      formGroup.style.width = totalW + 'px';
+    }
   }
 
   /** Programmatically select a value (no onChange fired). */
@@ -443,6 +488,10 @@ class FilterSelect {
     this._input.value = '';
     this._input.placeholder = this._placeholder;
     this._dropdown.innerHTML = '';
+    // Clear auto-sized widths
+    this._input.style.width = '';
+    const formGroup = this._el.closest('.form-group');
+    if (formGroup) { formGroup.style.minWidth = ''; formGroup.style.width = ''; }
     this.setDisabled(true);
   }
 
@@ -604,12 +653,18 @@ const GlobalNav = {
   _serials: {},
   _steps: {},
   _files: {},
+  _isFavourite: false,
 
   // FilterSelect widget instances (set in init)
   _rootFs: null,
   _serialFs: null,
   _stepFs: null,
   _fileFs: null,
+  _fileListFs: null,
+  _fileListMode: 'all',   // 'all' | 'favs' | 'list:N'
+  _favPaths: [],
+  _listFilePaths: {},     // { listId: [path, ...] }
+  _filteredTree: null,    // { root: { serial: { step: [files] } } } when filter active
   _sidebarEl: null,
 
   // ── Initialisation ──────────────────────────────────────────────────────
@@ -619,6 +674,7 @@ const GlobalNav = {
     const serialDiv = document.getElementById('globalSerial');
     const stepDiv   = document.getElementById('globalStep');
     const fileDiv   = document.getElementById('globalFile');
+    const fileListDiv = document.getElementById('globalFileList');
     this._sidebarEl = document.getElementById('sidebarContent');
 
     if (!rootDiv || !serialDiv || !stepDiv || !fileDiv) {
@@ -631,6 +687,14 @@ const GlobalNav = {
     this._serialFs = new FilterSelect(serialDiv, { onChange: (v) => this.onSerialChange(v) });
     this._stepFs   = new FilterSelect(stepDiv,   { onChange: (v) => this.onStepChange(v) });
     this._fileFs   = new FilterSelect(fileDiv,   { onChange: (v) => this.onFileChange(v) });
+
+    // FILE LISTS combobox (far right)
+    if (fileListDiv) {
+      this._fileListFs = new FilterSelect(fileListDiv, {
+        onChange: (v) => this._onFileListChange(v)
+      });
+      this._loadFileListOptions();
+    }
 
     // Persist sidebar scroll position on scroll (debounced)
     if (this._sidebarEl) {
@@ -735,6 +799,7 @@ const GlobalNav = {
     // Load sidebar — isolated so errors here don't break dropdown restoration
     try {
       await this._loadSidebar(false);
+      this._checkFavourite();
     } catch (e) {
       console.warn('Sidebar restore failed:', e);
     }
@@ -761,6 +826,13 @@ const GlobalNav = {
     if (this.onSelectionChange) this.onSelectionChange();
     if (!this.root) { URLState.save(); return; }
 
+    // If a file list filter is active, use the filtered tree
+    if (this._isFilterActive()) {
+      this._onFilteredRootSelected(this.root);
+      URLState.save();
+      return;
+    }
+
     try {
       showLoading('Loading serials\u2026');
       const data = await apiFetch(
@@ -785,6 +857,13 @@ const GlobalNav = {
     if (this.onSelectionChange) this.onSelectionChange();
     if (!this.serial) { URLState.save(); return; }
 
+    // If a file list filter is active, use the filtered tree
+    if (this._isFilterActive()) {
+      this._onFilteredSerialSelected(this.root, this.serial);
+      URLState.save();
+      return;
+    }
+
     try {
       showLoading('Loading steps\u2026');
       const data = await apiFetch(
@@ -808,6 +887,13 @@ const GlobalNav = {
     this._clearAllPageState();
     if (this.onSelectionChange) this.onSelectionChange();
     if (!this.step) { URLState.save(); return; }
+
+    // If a file list filter is active, use the filtered tree
+    if (this._isFilterActive()) {
+      this._onFilteredStepSelected(this.root, this.serial, this.step);
+      URLState.save();
+      return;
+    }
 
     try {
       showLoading('Loading files\u2026');
@@ -835,6 +921,7 @@ const GlobalNav = {
     if (!selectedPath) {
       this.filePath = null; this.fileName = null; this.fileSize = null;
       this._clearSidebar();
+      this._updateFavHeart(false);
       URLState.save();
       return;
     }
@@ -846,11 +933,231 @@ const GlobalNav = {
 
     try {
       await this._loadSidebar();
+      this._checkFavourite();
       if (this.onFileSelected) this.onFileSelected();
       URLState.save();
     } catch (err) {
       showToast(`Failed to load sidebar: ${err.message}`, 'error');
     }
+  },
+
+  // ── Navigate to file by path ─────────────────────────────────────────
+
+  /**
+   * Resolve a file path to its cascade coordinates and navigate to it,
+   * setting root/serial/step/file dropdowns and triggering file selection.
+   */
+  async navigateToFile(filePath) {
+    try {
+      const data = await apiFetch(`/api/resolve-path?path=${encodeURIComponent(filePath)}`);
+      const { root, serial, step, file } = data;
+
+      // Reset file list filter to 'all' so the cascade is unfiltered
+      if (this._fileListFs) {
+        this._fileListFs.setValue('all');
+        this._fileListMode = 'all';
+        this._filteredTree = null;
+      }
+
+      // Set root
+      this._rootFs.setValue(root);
+      this.root = root;
+
+      // Load serials for this root and set serial
+      await this.onRootChange(root);
+      this._serialFs.setValue(serial);
+      this.serial = serial;
+
+      // Load steps for this serial and set step
+      await this.onSerialChange(serial);
+      this._stepFs.setValue(step);
+      this.step = step;
+
+      // Load files for this step and set the file
+      await this.onStepChange(step);
+      this._fileFs.setValue(file.path);
+
+      // Trigger file selection
+      await this.onFileChange(file.path);
+    } catch (err) {
+      showToast(`Failed to navigate to file: ${err.message}`, 'error');
+    }
+  },
+
+  // ── Favourites ────────────────────────────────────────────────────────
+
+  async _checkFavourite() {
+    const heart = document.getElementById('favHeart');
+    if (!this.filePath) {
+      this._updateFavHeart(false);
+      return;
+    }
+    heart.style.display = 'flex';
+    try {
+      const data = await apiFetch(`/api/favourites/${encodePath(this.filePath)}`);
+      this._updateFavHeart(data.favourite);
+    } catch (_) { /* silent */ }
+  },
+
+  _updateFavHeart(isFav) {
+    this._isFavourite = isFav;
+    const heart = document.getElementById('favHeart');
+    if (!heart) return;
+    if (!this.filePath) { heart.style.display = 'none'; return; }
+    heart.style.display = 'flex';
+    heart.classList.toggle('active', isFav);
+  },
+
+  async toggleFavourite() {
+    if (!this.filePath) return;
+    const newState = !this._isFavourite;
+    try {
+      await apiPost(`/api/favourites/${encodePath(this.filePath)}`, { active: newState });
+      this._updateFavHeart(newState);
+      // Refresh favs cache so file list filter updates
+      this._refreshFavPaths();
+    } catch (err) {
+      showToast(`Failed to toggle favourite: ${err.message}`, 'error');
+    }
+  },
+
+  // ── File Lists filter ─────────────────────────────────────────────────
+
+  async _loadFileListOptions() {
+    if (!this._fileListFs) return;
+    try {
+      const [listsData, favsData] = await Promise.all([
+        apiFetch('/api/lists'),
+        apiFetch('/api/favourites')
+      ]);
+      this._favPaths = favsData.paths || [];
+
+      const items = [
+        { value: 'all', label: 'All files' },
+        { value: 'favs', label: 'My favs' }
+      ];
+      for (const list of (listsData.lists || [])) {
+        items.push({ value: `list:${list.id}`, label: list.name });
+      }
+      this._fileListFs.setItems(items);
+      this._fileListFs.setValue('all');
+      this._fileListFs.setDisabled(false);
+    } catch (_) {
+      // Silently fail — file list filter is optional
+    }
+  },
+
+  async _refreshFavPaths() {
+    try {
+      const data = await apiFetch('/api/favourites');
+      this._favPaths = data.paths || [];
+    } catch (_) { /* silent */ }
+  },
+
+  async _onFileListChange(val) {
+    this._fileListMode = val;
+    this._filteredTree = null;
+
+    // Reset ALL dropdowns (including root) and clear page state
+    this.root = null;
+    this._rootFs.reset('Select root\u2026');
+    this._resetFrom('serial');
+    this._clearAllPageState();
+    if (this.onSelectionChange) this.onSelectionChange();
+
+    if (val === 'all') {
+      // Restore unfiltered roots
+      this._rootFs.setItems(this._roots);
+      this._rootFs.setDisabled(false);
+      if (this._roots.length === 1) {
+        this.root = this._roots[0];
+        this._rootFs.setValue(this._roots[0]);
+        try {
+          const data = await apiFetch(`/api/roots/${encodeURIComponent(this.root)}/serials`);
+          this._serials[this.root] = data.serials || [];
+          this._serialFs.setItems(this._serials[this.root]);
+          this._serialFs.setDisabled(false);
+        } catch (_) {}
+      }
+      URLState.save();
+      return;
+    }
+
+    // Fetch filtered tree from server
+    try {
+      showLoading('Filtering\u2026');
+      const data = await apiFetch(`/api/file-tree?filter=${encodeURIComponent(val)}`);
+      this._filteredTree = data.tree || {};
+      hideLoading();
+    } catch (err) {
+      hideLoading();
+      showToast(`Failed to load filtered tree: ${err.message}`, 'error');
+      return;
+    }
+
+    // Populate Root dropdown with only roots that have matching files
+    const filteredRoots = Object.keys(this._filteredTree);
+    this._rootFs.setItems(filteredRoots);
+    this._rootFs.setDisabled(false);
+
+    // Auto-select if only one root
+    if (filteredRoots.length === 1) {
+      this.root = filteredRoots[0];
+      this._rootFs.setValue(filteredRoots[0]);
+      this._onFilteredRootSelected(filteredRoots[0]);
+    }
+
+    URLState.save();
+  },
+
+  /** When a file list filter is active and root is selected, populate serials from filtered tree. */
+  _onFilteredRootSelected(rootLabel) {
+    if (!this._filteredTree || !this._filteredTree[rootLabel]) return;
+    const serials = Object.keys(this._filteredTree[rootLabel]).sort();
+    this._serialFs.setItems(serials);
+    this._serialFs.setDisabled(false);
+    if (serials.length === 1) {
+      this.serial = serials[0];
+      this._serialFs.setValue(serials[0]);
+      this._onFilteredSerialSelected(rootLabel, serials[0]);
+    }
+  },
+
+  /** When a file list filter is active and serial is selected, populate steps from filtered tree. */
+  _onFilteredSerialSelected(rootLabel, serial) {
+    if (!this._filteredTree || !this._filteredTree[rootLabel] || !this._filteredTree[rootLabel][serial]) return;
+    const steps = Object.keys(this._filteredTree[rootLabel][serial]).sort();
+    this._stepFs.setItems(steps);
+    this._stepFs.setDisabled(false);
+    if (steps.length === 1) {
+      this.step = steps[0];
+      this._stepFs.setValue(steps[0]);
+      this._onFilteredStepSelected(rootLabel, serial, steps[0]);
+    }
+  },
+
+  /** When a file list filter is active and step is selected, populate files from filtered tree. */
+  _onFilteredStepSelected(rootLabel, serial, step) {
+    if (!this._filteredTree || !this._filteredTree[rootLabel] || !this._filteredTree[rootLabel][serial]) return;
+    const files = this._filteredTree[rootLabel][serial][step] || [];
+    // Cache for sidebar loading
+    this._files[step] = files;
+    this._fileFs.setItems(files.map(f => ({
+      value: f.path,
+      label: `${f.filename} (${formatBytes(f.size)})`
+    })));
+    this._fileFs.setDisabled(false);
+  },
+
+  /** Check if a filtered tree is active (non-null). */
+  _isFilterActive() {
+    return this._filteredTree != null;
+  },
+
+  /** Refresh file list options (called externally after list changes). */
+  refreshFileLists() {
+    this._listFilePaths = {};
+    this._loadFileListOptions();
   },
 
   // ── Sidebar ─────────────────────────────────────────────────────────────
@@ -931,6 +1238,7 @@ const GlobalNav = {
 
     for (const i of sorted) {
       const name = names[i] || `signal_${String(i).padStart(3, '0')}`;
+      const displayName = name.replace(/_/g, ' ');
       const unit = units[i] || '';
 
       const item = document.createElement('div');
@@ -939,7 +1247,7 @@ const GlobalNav = {
       item.setAttribute('data-idx', i);
       item.innerHTML = `
         <span class="signal-dot"></span>
-        <span class="signal-name">${fmtHtml(name)}</span>
+        <span class="signal-name" title="${escapeHtml(displayName)}">${fmtHtml(displayName)}</span>
         <span class="signal-units">${fmtHtml(unit) || '\u2014'}</span>
       `;
       item.addEventListener('click', () => {
@@ -1042,7 +1350,57 @@ document.addEventListener('DOMContentLoaded', () => {
   hideLoading();
   // Init GlobalNav (stores promise for pages to await)
   GlobalNav._ready = GlobalNav.init();
+  // Init sidebar resizer
+  _initSidebarResize();
 });
+
+// ── Sidebar resize ──────────────────────────────────────────────────────
+
+function _initSidebarResize() {
+  const handle = document.getElementById('sidebarResizeHandle');
+  if (!handle) return;
+
+  // Restore saved width
+  const saved = sessionStorage.getItem('sidebarWidth');
+  if (saved) _applySidebarWidth(parseInt(saved, 10));
+
+  let startX = 0, startW = 0, dragging = false;
+
+  handle.addEventListener('mousedown', (e) => {
+    e.preventDefault();
+    dragging = true;
+    startX = e.clientX;
+    startW = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--sidebar-width'), 10) || 260;
+    handle.classList.add('active');
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  });
+
+  document.addEventListener('mousemove', (e) => {
+    if (!dragging) return;
+    const dx = e.clientX - startX;
+    const newW = Math.max(160, Math.min(600, startW + dx));
+    _applySidebarWidth(newW);
+  });
+
+  document.addEventListener('mouseup', () => {
+    if (!dragging) return;
+    dragging = false;
+    handle.classList.remove('active');
+    document.body.style.cursor = '';
+    document.body.style.userSelect = '';
+    const w = parseInt(getComputedStyle(document.documentElement).getPropertyValue('--sidebar-width'), 10);
+    sessionStorage.setItem('sidebarWidth', w);
+    // Trigger Plotly resize if active
+    window.dispatchEvent(new Event('resize'));
+  });
+}
+
+function _applySidebarWidth(px) {
+  document.documentElement.style.setProperty('--sidebar-width', px + 'px');
+  const handle = document.getElementById('sidebarResizeHandle');
+  if (handle) handle.style.left = px + 'px';
+}
 
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Escape') {
@@ -1061,5 +1419,5 @@ window.addEventListener('error', () => { hideLoading(); });
 
 window.APP = {
   showToast, showLoading, hideLoading,
-  formatNumber, encodePath, decodePath, GlobalNav
+  formatNumber, encodePath, decodePath, displayName, GlobalNav
 };

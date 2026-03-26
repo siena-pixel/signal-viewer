@@ -17,6 +17,7 @@ from signal_viewer import config
 from signal_viewer.core.metadata_index import MetadataIndex
 from signal_viewer.core.signal_cache import SignalCache
 from signal_viewer.core.hdf5_reader import HDF5Reader
+from signal_viewer.core.database import Database
 from signal_viewer.server.handlers import (
     PageHandler,
     RootsHandler,
@@ -31,6 +32,13 @@ from signal_viewer.server.handlers import (
     TrendHandler,
     CacheStatsHandler,
     RescanHandler,
+    FavouritesHandler,
+    FavouritePathsHandler,
+    FileTreeHandler,
+    ResolvePathHandler,
+    CommentsHandler,
+    ListsHandler,
+    ListFilesHandler,
 )
 
 logger = logging.getLogger(__name__)
@@ -73,6 +81,10 @@ class Application(tornado.web.Application):
         # Dict to hold open HDF5Readers (lazy loading)
         self.hdf5_readers: Dict[str, HDF5Reader] = {}
 
+        # SQLite database for favourites, comments, lists
+        self.database = Database(str(config.DATABASE_PATH))
+        logger.info(f"Database initialized: {config.DATABASE_PATH}")
+
 
 def make_app():
     """
@@ -113,6 +125,17 @@ def make_app():
         (r"/api/analysis/trend", TrendHandler),
         (r"/api/cache/stats", CacheStatsHandler),
         (r"/api/rescan", RescanHandler),
+        # Favourites / Comments / Lists
+        (r"/api/favourites", FavouritePathsHandler),
+        (r"/api/favourites/([^/]+)", FavouritesHandler),
+        (r"/api/comments/([^/]+)", CommentsHandler),
+        (r"/api/lists", ListsHandler),
+        (r"/api/lists/(\d+)/files", ListFilesHandler),
+        (r"/api/file-tree", FileTreeHandler),
+        (r"/api/resolve-path", ResolvePathHandler),
+        # Notes & Lists pages
+        (r"/comments", PageHandler, {"template": "comments.html"}),
+        (r"/lists", PageHandler, {"template": "lists.html"}),
     ]
 
     # Create application with settings

@@ -34,5 +34,10 @@ Thumbs.db
 .coverage
 htmlcov/
 
+# SQLite database (favourites, notes, lists)
+*.db3
+*.db3-wal
+*.db3-shm
+
 # Misc
 *.log

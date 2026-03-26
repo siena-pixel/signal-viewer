@@ -66,10 +66,10 @@
   --font-mono: "Menlo", "Monaco", "Courier New", monospace;
 
   /* Layout Dimensions */
-  --navbar-height: 48px;
   --file-selector-height: 56px;
+  --navbar-height: 38px;
   --sidebar-width: 260px;
-  --top-offset: calc(var(--navbar-height) + var(--file-selector-height));
+  --top-offset: calc(var(--file-selector-height) + var(--navbar-height));
   --scrollbar-width: 7px;
 }
 
@@ -111,56 +111,49 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; }
 
 
 /* ============================================================================
-   NAVIGATION BAR  (fixed, z-index: 100)
+   NAVIGATION BAR  (fixed, below file selector, z-index: 95)
    ============================================================================ */
 
 .navbar {
   position: fixed;
-  top: 0; left: 0; right: 0;
+  top: var(--file-selector-height);
+  left: 0; right: 0;
   height: var(--navbar-height);
   background-color: var(--color-bg-secondary);
   border-bottom: 1px solid var(--color-border);
-  z-index: 100;
+  z-index: 95;
   display: flex;
   align-items: center;
-  justify-content: space-between;
+  justify-content: flex-start;
   padding: 0 var(--spacing-lg);
-  box-shadow: var(--shadow-sm);
-}
-
-.navbar-brand {
-  font-size: 16px;
-  font-weight: 700;
-  color: var(--color-primary);
-  letter-spacing: 0.3px;
 }
 
 .navbar-nav {
   display: flex;
   list-style: none;
-  gap: var(--spacing-lg);
+  gap: var(--spacing-xs);
 }
 
 .navbar-nav a {
   color: var(--color-text-secondary);
   text-decoration: none;
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 500;
   position: relative;
-  transition: color 0.2s;
-  padding-bottom: 2px;
+  transition: color 0.2s, background-color 0.15s;
+  padding: 4px 12px;
+  border-radius: var(--radius-sm);
 }
 
-.navbar-nav a:hover { color: var(--color-text-primary); }
-.navbar-nav a.active { color: var(--color-primary); font-weight: 600; }
+.navbar-nav a:hover {
+  color: var(--color-text-primary);
+  background-color: var(--color-hover);
+}
 
-.navbar-nav a.active::after {
-  content: "";
-  position: absolute;
-  bottom: -12px; left: 0; right: 0;
-  height: 2px;
-  background-color: var(--color-primary);
-  border-radius: 1px;
+.navbar-nav a.active {
+  color: var(--color-primary);
+  font-weight: 600;
+  background-color: var(--color-primary-subtle);
 }
 
 
@@ -170,12 +163,12 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; }
 
 .file-selector-bar {
   position: fixed;
-  top: var(--navbar-height);
+  top: 0;
   left: 0; right: 0;
   height: var(--file-selector-height);
   background-color: var(--color-bg-secondary);
   border-bottom: 1px solid var(--color-border);
-  z-index: 90;
+  z-index: 100;
   display: flex;
   align-items: center;
   padding: var(--spacing-sm) var(--spacing-lg) 12px;
@@ -191,7 +184,7 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; }
   display: flex;
   flex-direction: column;
   gap: 2px;
-  min-width: 180px;
+  min-width: 120px;
   flex-shrink: 0;
 }
 
@@ -500,7 +493,7 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; }
   border: 1px solid var(--color-border-light);
   border-left: 4px solid var(--color-primary);
   border-radius: var(--radius-sm);
-  padding: 10px 32px 10px 12px;
+  padding: 8px 28px 8px 10px;
   flex: 0 0 calc((100% - 4 * var(--spacing-sm)) / 5);  /* always 1/5 width */
   min-width: 0;
   box-shadow: var(--shadow-sm);
@@ -530,7 +523,7 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; }
 }
 
 .card-batch {
-  font-size: 0.68rem;
+  font-size: 0.65rem;
   font-weight: 600;
   text-transform: uppercase;
   letter-spacing: 0.3px;
@@ -539,68 +532,93 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; }
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  line-height: 14px;
-  min-height: 14px;
+  line-height: 13px;
+  min-height: 13px;
 }
 
 .card-name {
-  font-size: 13px;
+  font-size: 12px;
   font-weight: 600;
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  margin-bottom: 0;
-  line-height: 18px;
-  min-height: 18px;
-}
-
-.card-value {
-  font-size: 13px;
-  font-weight: 600;
-  font-family: var(--font-mono);
-  white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
-  margin-bottom: 0;
-  color: var(--color-text-primary);
-  line-height: 18px;
-  min-height: 18px;
-}
-
-.card-units {
-  font-size: 13px;
-  font-weight: 600;
-  color: #8e90a6;
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
   margin-bottom: 4px;
-  margin-top: 0;
-  line-height: 18px;
-  min-height: 18px;
+  line-height: 16px;
+  min-height: 16px;
+}
+
+/* Compact value + units on same line */
+.card-value-row {
+  display: flex;
+  align-items: baseline;
+  gap: 4px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  line-height: 16px;
+  min-height: 16px;
+  margin-bottom: 6px;
+}
+
+.card-value {
+  font-size: 12px;
+  font-weight: 600;
+  font-family: var(--font-mono);
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  color: var(--color-text-primary);
+}
+
+.card-units {
+  font-size: 11px;
+  font-weight: 500;
+  color: var(--color-text-muted);
+  white-space: nowrap;
+  flex-shrink: 0;
 }
 
 .card-hover-info {
-  font-size: 0.65rem;
+  font-size: 0.6rem;
   font-family: var(--font-mono);
   color: var(--color-text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  line-height: 14px;
-  min-height: 14px;
+  line-height: 13px;
+  min-height: 13px;
+  margin-bottom: 2px;
 }
 
 .card-sample {
-  font-size: 0.65rem;
+  font-size: 0.6rem;
   font-family: var(--font-mono);
   color: var(--color-text-muted);
   white-space: nowrap;
   overflow: hidden;
   text-overflow: ellipsis;
-  line-height: 14px;
-  min-height: 14px;
+  line-height: 13px;
+  min-height: 13px;
 }
+
+/* Collapsible signal cards block */
+.signal-cards-toggle {
+  font-size: 11px;
+  font-weight: 600;
+  color: var(--color-text-muted);
+  cursor: pointer;
+  user-select: none;
+  margin-top: var(--spacing-md);
+  margin-bottom: 2px;
+  padding: 2px 0;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+}
+
+.signal-cards-toggle:hover { color: var(--color-text-primary); }
+.signal-cards-toggle .toggle-arrow { transition: transform 0.2s; }
+.signal-cards-toggle.collapsed .toggle-arrow { transform: rotate(-90deg); }
 
 
 /* ============================================================================
@@ -870,6 +888,10 @@ button, input, select, textarea { font-family: inherit; font-size: inherit; }
   padding-bottom: 12px;  /* breathing room below x-axis label */
 }
 
+/* Hide Plotly's "Double-click to zoom back out" notification banner
+   (Plotly appends .plotly-notifier to <body>, outside the plot area) */
+.plotly-notifier { display: none !important; }
+
 
 /* ============================================================================
    GENERIC CARDS
@@ -1131,28 +1153,364 @@ details > :not(summary) { margin-left: var(--spacing-lg); color: var(--color-tex
 
 
 /* ============================================================================
-   VIEWER — ZOOM INDICATOR
+   FILE LISTS COMBOBOX (far right in file selector bar)
    ============================================================================ */
 
-.zoom-indicator {
-  font-size: 0.7rem;
-  font-family: var(--font-mono);
+.file-lists-group {
+  margin-left: auto;   /* push to far right */
+  min-width: 160px;
+}
+
+
+/* ============================================================================
+   FAVOURITE HEART ICON
+   ============================================================================ */
+
+.fav-heart {
+  background: none;
+  border: none;
+  cursor: pointer;
   color: var(--color-text-muted);
-  background: var(--color-bg-secondary);
-  border: 1px solid var(--color-border-light);
-  border-radius: 10px;
-  padding: 2px 10px;
+  padding: 4px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  flex-shrink: 0;
+  transition: color 0.2s, transform 0.15s;
+  margin-top: 10px;   /* align with dropdowns */
+}
+
+.fav-heart:hover { color: var(--color-primary); transform: scale(1.15); }
+
+.fav-heart.active {
+  color: var(--color-primary);
+}
+
+.fav-heart.active svg { fill: var(--color-primary); }
+
+
+/* ============================================================================
+   SIDEBAR RESIZE HANDLE
+   ============================================================================ */
+
+.sidebar-resize-handle {
+  position: fixed;
+  left: var(--sidebar-width);
+  top: var(--top-offset);
+  width: 5px;
+  height: calc(100vh - var(--top-offset));
+  cursor: col-resize;
+  z-index: 85;
+  background: transparent;
+  transition: background-color 0.15s;
+}
+
+.sidebar-resize-handle:hover,
+.sidebar-resize-handle.active {
+  background-color: var(--color-primary);
+  opacity: 0.4;
+}
+
+
+/* ============================================================================
+   SIGNAL NAME TOOLTIP
+   ============================================================================ */
+
+.signal-item .signal-name {
+  position: relative;
+}
+
+.signal-item .signal-name[title]:hover::after {
+  content: attr(title);
+  position: absolute;
+  left: 0;
+  bottom: 100%;
+  background: var(--color-text-primary);
+  color: #fff;
+  padding: 4px 8px;
+  border-radius: var(--radius-sm);
+  font-size: 11px;
+  white-space: nowrap;
+  z-index: 200;
+  pointer-events: none;
+  max-width: 400px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+
+/* ============================================================================
+   NOTES / LISTS PAGES — TWO-COLUMN LAYOUT
+   ============================================================================ */
+
+.notes-layout {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: var(--spacing-lg);
+}
+
+.notes-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+}
+
+/* Full file path header */
+.notes-file-path {
+  font-size: 12px;
+  color: var(--color-text-secondary);
+  word-break: break-all;
+  line-height: 1.4;
+}
+
+/* Private note textarea — fixed width & height */
+.private-note-textarea {
+  width: 100%;
+  height: calc(15 * 1.5em + 16px);  /* 15 lines */
+  resize: none;
+  overflow-y: auto;
+  font-size: 13px;
+  padding: var(--spacing-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  box-sizing: border-box;
+}
+
+/* Public note textarea — 5 lines */
+.public-note-textarea {
+  width: 100%;
+  height: calc(5 * 1.5em + 16px);  /* 5 lines */
+  resize: none;
+  overflow-y: auto;
+  font-size: 13px;
+  padding: var(--spacing-sm);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-sm);
+  font-family: inherit;
+  box-sizing: border-box;
+}
+
+/* Save row — right-aligned */
+.note-save-row {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: var(--spacing-md);
+  margin-top: var(--spacing-sm);
+}
+
+.note-save-row .comment-meta {
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+  margin: 0;
+}
+
+/* Public note card */
+.public-note-card {
+  position: relative;
+  border-left: 3px solid var(--color-primary);
+  padding: var(--spacing-sm) var(--spacing-md);
+  padding-right: 28px;
+  margin-bottom: var(--spacing-sm);
+  background: var(--color-bg-primary);
+  border-radius: 0 var(--radius-sm) var(--radius-sm) 0;
+}
+
+.public-note-card .note-header {
+  display: flex;
+  align-items: baseline;
+  gap: var(--spacing-sm);
+  font-size: 0.72rem;
+  color: var(--color-text-muted);
+}
+
+.public-note-card .note-author {
+  font-weight: 700;
+  color: var(--color-text-secondary);
+}
+
+.public-note-card .note-content {
+  font-size: 13px;
+  color: var(--color-text-secondary);
+  margin-top: 2px;
+  line-height: 1.5;
+}
+
+.public-note-card .note-delete {
+  position: absolute;
+  top: 6px;
+  right: 6px;
+  background: none;
+  border: none;
+  cursor: pointer;
+  font-size: 11px;
+  color: var(--color-text-muted);
+  padding: 2px 5px;
+  border-radius: 3px;
+  line-height: 1;
+  transition: background-color 0.15s, color 0.15s;
+}
+
+.public-note-card .note-delete:hover {
+  background: var(--color-hover);
+  color: var(--color-danger);
+}
+
+/* ── Lists page layout (stacked top/bottom) ───────────────────────── */
+
+.lists-page {
+  display: flex;
+  flex-direction: column;
+  gap: var(--spacing-md);
+  height: 100%;
+}
+
+.lists-top-card {
+  flex-shrink: 0;
+}
+
+/* Scrollable list container — fits ~5 rows then scrolls */
+.lists-scroll-container {
+  max-height: 230px;
+  overflow-y: auto;
+}
+
+.lists-bottom-card {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+}
+
+.lists-bottom-card > .card-body {
+  flex: 1;
+  overflow-y: auto;
+}
+
+/* ── List rows (top section) ──────────────────────────────────────── */
+
+.list-row {
+  display: grid;
+  grid-template-columns: 1fr 100px 110px auto;
+  align-items: center;
+  gap: var(--spacing-sm);
+  padding: 6px var(--spacing-md);
+  border-bottom: 1px solid var(--color-border-light);
+  font-size: 13px;
+  cursor: pointer;
+  transition: background-color 0.12s;
+}
+
+.list-row:last-child { border-bottom: none; }
+.list-row:hover { background-color: var(--color-hover); }
+.list-row.active { border-left: 3px solid var(--color-primary); background-color: var(--color-primary-subtle); }
+
+.list-row-name {
+  font-weight: 500;
+  overflow: hidden;
+  text-overflow: ellipsis;
   white-space: nowrap;
 }
 
-.zoom-indicator.loading {
-  color: var(--color-primary);
-  border-color: var(--color-primary);
+.list-row-meta {
+  font-size: 11px;
+  color: var(--color-text-muted);
+  white-space: nowrap;
 }
 
-.zoom-indicator.error {
-  color: var(--color-danger);
-  border-color: var(--color-danger);
+.list-row.favs-row {
+  /* My Favs row only has the name — collapse to single column */
+  grid-template-columns: 1fr;
+}
+
+.list-row-actions {
+  display: flex;
+  align-items: center;
+  gap: var(--spacing-lg);     /* 24px between toggle and Delete */
+  justify-content: flex-end;
+}
+
+/* ── Toggle switch ────────────────────────────────────────────────── */
+
+.toggle-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  cursor: pointer;
+  user-select: none;
+  font-size: 11px;
+}
+
+.toggle-switch input { display: none; }
+
+.toggle-slider {
+  position: relative;
+  width: 28px;
+  height: 16px;
+  background-color: var(--color-border);
+  border-radius: 8px;
+  transition: background-color 0.2s;
+  flex-shrink: 0;
+}
+
+.toggle-slider::after {
+  content: '';
+  position: absolute;
+  top: 2px;
+  left: 2px;
+  width: 12px;
+  height: 12px;
+  background-color: #fff;
+  border-radius: 50%;
+  transition: transform 0.2s;
+}
+
+.toggle-switch input:checked + .toggle-slider {
+  background-color: var(--color-primary);
+}
+
+.toggle-switch input:checked + .toggle-slider::after {
+  transform: translateX(12px);
+}
+
+.toggle-switch input:disabled + .toggle-slider {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.toggle-label-text {
+  color: var(--color-text-muted);
+  min-width: 40px;
+}
+
+/* ── File items (bottom section) ──────────────────────────────────── */
+
+.list-file-item {
+  display: flex;
+  align-items: center;
+  padding: 8px var(--spacing-md);
+  border-bottom: 1px solid var(--color-border-light);
+  font-size: 12px;
+  gap: var(--spacing-sm);
+}
+
+.list-file-item:last-child { border-bottom: none; }
+
+.list-file-item .file-path-full {
+  flex: 1;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--color-text-secondary);
+}
+
+.list-file-actions {
+  display: flex;
+  gap: var(--spacing-xs);
+  flex-shrink: 0;
+  margin-left: auto;
 }
 
 
@@ -1188,10 +1546,10 @@ details > :not(summary) { margin-left: var(--spacing-lg); color: var(--color-tex
 
 @media (max-width: 600px) {
   .navbar { padding: 0 var(--spacing-md); }
-  .navbar-brand { font-size: 14px; }
-  .navbar-nav { gap: var(--spacing-md); }
+  .navbar-nav { gap: var(--spacing-xs); }
   .module-content { padding: var(--spacing-md); }
   .module-header { padding: var(--spacing-sm) var(--spacing-md); }
   .file-selector-bar { padding: 0 var(--spacing-md); gap: var(--spacing-sm); }
   .form-group { min-width: 110px; }
+  .notes-layout { grid-template-columns: 1fr; }
 }

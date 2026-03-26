@@ -66,7 +66,7 @@ class BaseHandler(tornado.web.RequestHandler):
         """Set default headers for CORS and JSON."""
         self.set_header("Content-Type", "application/json")
         self.set_header("Access-Control-Allow-Origin", "*")
-        self.set_header("Access-Control-Allow-Methods", "GET, POST, OPTIONS")
+        self.set_header("Access-Control-Allow-Methods", "GET, POST, DELETE, OPTIONS")
         self.set_header(
             "Access-Control-Allow-Headers",
             "Content-Type, Authorization",
@@ -427,9 +427,13 @@ class SignalHandler(BaseHandler):
                         # Binary-search for slice boundaries
                         i_lo = int(np.searchsorted(time_full, t_min, side="left"))
                         i_hi = int(np.searchsorted(time_full, t_max, side="right"))
-                        # Expand by 1 on each side for smooth edges
-                        i_lo = max(0, i_lo - 1)
-                        i_hi = min(total_samples, i_hi + 1)
+                        # Expand context on each side by ~2% of the slice length
+                        # (minimum 2 samples) so the LTTB-downsampled result has
+                        # adequate density at the visible edges.
+                        slice_len = max(i_hi - i_lo, 1)
+                        expand = max(2, int(slice_len * 0.02))
+                        i_lo = max(0, i_lo - expand)
+                        i_hi = min(total_samples, i_hi + expand)
                         time_full = time_full[i_lo:i_hi]
                         signal_full = signal_full[i_lo:i_hi]
                         is_windowed = True
@@ -898,4 +902,411 @@ class RescanHandler(BaseHandler):
                 logger.error(f"Error in RescanHandler: {e}\n{traceback.format_exc()}")
             else:
                 logger.error(f"Error in RescanHandler: {e}")
+            raise tornado.web.HTTPError(500, str(e))
+
+
+# ======================================================================
+# Favourites / Comments / Lists API
+# ======================================================================
+
+class FavouritesHandler(BaseHandler):
+    """GET/POST /api/favourites/{encoded_path} → Check or toggle favourite."""
+
+    def get(self, encoded_path: str):
+        """Check whether a file is favourited by the current user."""
+        try:
+            file_path = self.decode_file_path(encoded_path)
+            db = self.application.database
+            self.write_json({"favourite": db.is_favourite(file_path)})
+        except tornado.web.HTTPError:
+            raise
+        except ValueError as e:
+            raise tornado.web.HTTPError(400, str(e))
+        except Exception as e:
+            if config.VERBOSE:
+                logger.error(f"Error in FavouritesHandler GET: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in FavouritesHandler GET: {e}")
+            raise tornado.web.HTTPError(500, str(e))
+
+    def post(self, encoded_path: str):
+        """Toggle favourite on/off. Body: {"active": true/false}."""
+        try:
+            file_path = self.decode_file_path(encoded_path)
+            data = json.loads(self.request.body)
+            active = bool(data.get("active", True))
+            db = self.application.database
+            new_state = db.set_favourite(file_path, active)
+            self.write_json({"favourite": new_state})
+        except tornado.web.HTTPError:
+            raise
+        except ValueError as e:
+            raise tornado.web.HTTPError(400, str(e))
+        except Exception as e:
+            if config.VERBOSE:
+                logger.error(f"Error in FavouritesHandler POST: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in FavouritesHandler POST: {e}")
+            raise tornado.web.HTTPError(500, str(e))
+
+
+class CommentsHandler(BaseHandler):
+    """GET/POST /api/comments/{encoded_path} → Read or write comments for a file."""
+
+    def get(self, encoded_path: str):
+        """Return private + public comments for a file."""
+        try:
+            file_path = self.decode_file_path(encoded_path)
+            db = self.application.database
+            self.write_json(db.get_comments(file_path))
+        except tornado.web.HTTPError:
+            raise
+        except ValueError as e:
+            raise tornado.web.HTTPError(400, str(e))
+        except Exception as e:
+            if config.VERBOSE:
+                logger.error(f"Error in CommentsHandler GET: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in CommentsHandler GET: {e}")
+            raise tornado.web.HTTPError(500, str(e))
+
+    def post(self, encoded_path: str):
+        """Create or update a comment.
+
+        Body: {
+          "content": "...",
+          "is_public": false,        // optional, default false (private)
+          "comment_id": null         // optional, for updating existing public comment
+        }
+        """
+        try:
+            file_path = self.decode_file_path(encoded_path)
+            data = json.loads(self.request.body)
+            content = data.get("content", "")
+            is_public = bool(data.get("is_public", False))
+            comment_id = data.get("comment_id")
+            db = self.application.database
+
+            if is_public:
+                cid = db.save_public_comment(
+                    file_path, content,
+                    comment_id=int(comment_id) if comment_id else None,
+                )
+            else:
+                cid = db.save_private_comment(file_path, content)
+
+            self.write_json({"id": cid})
+        except tornado.web.HTTPError:
+            raise
+        except ValueError as e:
+            raise tornado.web.HTTPError(400, str(e))
+        except Exception as e:
+            if config.VERBOSE:
+                logger.error(f"Error in CommentsHandler POST: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in CommentsHandler POST: {e}")
+            raise tornado.web.HTTPError(500, str(e))
+
+    def delete(self, encoded_path: str):
+        """Delete a comment by id. Query param: ?id=<comment_id>."""
+        try:
+            comment_id = self.get_argument("id", None)
+            if not comment_id:
+                raise tornado.web.HTTPError(400, "Missing comment id")
+            db = self.application.database
+            ok = db.delete_comment(int(comment_id))
+            self.write_json({"deleted": ok})
+        except tornado.web.HTTPError:
+            raise
+        except Exception as e:
+            if config.VERBOSE:
+                logger.error(f"Error in CommentsHandler DELETE: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in CommentsHandler DELETE: {e}")
+            raise tornado.web.HTTPError(500, str(e))
+
+
+class ListsHandler(BaseHandler):
+    """GET/POST/PATCH/DELETE /api/lists → Manage user lists."""
+
+    def get(self):
+        """Return all lists visible to the current user, including current_user."""
+        try:
+            db = self.application.database
+            current_user = db.get_current_user()
+            # Optional: filter lists that contain a specific file
+            file_filter = self.get_argument("file", None)
+            if file_filter:
+                self.write_json({
+                    "lists": db.get_lists_for_file(file_filter),
+                    "current_user": current_user,
+                })
+            else:
+                self.write_json({
+                    "lists": db.get_lists(),
+                    "current_user": current_user,
+                })
+        except Exception as e:
+            if config.VERBOSE:
+                logger.error(f"Error in ListsHandler GET: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in ListsHandler GET: {e}")
+            raise tornado.web.HTTPError(500, str(e))
+
+    def post(self):
+        """Create a new list. Body: {"name": "...", "is_public": false}."""
+        try:
+            data = json.loads(self.request.body)
+            name = data.get("name", "").strip()
+            if not name:
+                raise tornado.web.HTTPError(400, "List name is required")
+            is_public = bool(data.get("is_public", False))
+            db = self.application.database
+            lid = db.create_list(name, is_public=is_public)
+            if lid is None:
+                raise tornado.web.HTTPError(409, "List name already exists")
+            self.write_json({"id": lid, "name": name})
+        except tornado.web.HTTPError:
+            raise
+        except Exception as e:
+            if config.VERBOSE:
+                logger.error(f"Error in ListsHandler POST: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in ListsHandler POST: {e}")
+            raise tornado.web.HTTPError(500, str(e))
+
+    def patch(self):
+        """Toggle a list's public/private state. Body: {"list_id": N, "is_public": bool}."""
+        try:
+            data = json.loads(self.request.body)
+            list_id = data.get("list_id")
+            is_public = data.get("is_public")
+            if list_id is None or is_public is None:
+                raise tornado.web.HTTPError(400, "list_id and is_public are required")
+            db = self.application.database
+            ok = db.update_list_public(int(list_id), bool(is_public))
+            self.write_json({"updated": ok})
+        except tornado.web.HTTPError:
+            raise
+        except Exception as e:
+            if config.VERBOSE:
+                logger.error(f"Error in ListsHandler PATCH: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in ListsHandler PATCH: {e}")
+            raise tornado.web.HTTPError(500, str(e))
+
+    def delete(self):
+        """Delete a list. Query param: ?id=<list_id>."""
+        try:
+            list_id = self.get_argument("id", None)
+            if not list_id:
+                raise tornado.web.HTTPError(400, "Missing list id")
+            db = self.application.database
+            ok = db.delete_list(int(list_id))
+            self.write_json({"deleted": ok})
+        except tornado.web.HTTPError:
+            raise
+        except Exception as e:
+            if config.VERBOSE:
+                logger.error(f"Error in ListsHandler DELETE: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in ListsHandler DELETE: {e}")
+            raise tornado.web.HTTPError(500, str(e))
+
+
+class ListFilesHandler(BaseHandler):
+    """GET/POST/DELETE /api/lists/{list_id}/files → Manage files in a list."""
+
+    def get(self, list_id: str):
+        """Return files in a list."""
+        try:
+            db = self.application.database
+            files = db.get_list_files(int(list_id))
+            self.write_json({"files": files})
+        except Exception as e:
+            if config.VERBOSE:
+                logger.error(f"Error in ListFilesHandler GET: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in ListFilesHandler GET: {e}")
+            raise tornado.web.HTTPError(500, str(e))
+
+    def post(self, list_id: str):
+        """Add a file to a list. Body: {"file_path": "..."}."""
+        try:
+            data = json.loads(self.request.body)
+            file_path = data.get("file_path", "")
+            if not file_path:
+                raise tornado.web.HTTPError(400, "file_path is required")
+            db = self.application.database
+            ok = db.add_file_to_list(int(list_id), file_path)
+            self.write_json({"added": ok})
+        except tornado.web.HTTPError:
+            raise
+        except Exception as e:
+            if config.VERBOSE:
+                logger.error(f"Error in ListFilesHandler POST: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in ListFilesHandler POST: {e}")
+            raise tornado.web.HTTPError(500, str(e))
+
+    def delete(self, list_id: str):
+        """Remove a file from a list. Query param: ?file=<encoded_path>."""
+        try:
+            file_path = self.get_argument("file", None)
+            if not file_path:
+                raise tornado.web.HTTPError(400, "Missing file path")
+            db = self.application.database
+            ok = db.remove_file_from_list(int(list_id), file_path)
+            self.write_json({"removed": ok})
+        except tornado.web.HTTPError:
+            raise
+        except Exception as e:
+            if config.VERBOSE:
+                logger.error(f"Error in ListFilesHandler DELETE: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in ListFilesHandler DELETE: {e}")
+            raise tornado.web.HTTPError(500, str(e))
+
+
+class FavouritePathsHandler(BaseHandler):
+    """GET /api/favourites → Return all favourite file paths for the current user."""
+
+    def get(self):
+        try:
+            db = self.application.database
+            self.write_json({"paths": db.get_favourite_paths()})
+        except Exception as e:
+            if config.VERBOSE:
+                logger.error(f"Error in FavouritePathsHandler: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in FavouritePathsHandler: {e}")
+            raise tornado.web.HTTPError(500, str(e))
+
+
+class FileTreeHandler(BaseHandler):
+    """GET /api/file-tree?filter=favs|list:N → Filtered cascade tree.
+
+    Returns { tree: { rootLabel: { serial: { step: [{path, filename, size}] } } } }
+    containing only entries that lead to at least one matching file.
+    """
+
+    def get(self):
+        try:
+            filter_val = self.get_argument("filter", "all")
+            db = self.application.database
+
+            # Determine the set of allowed file paths
+            if filter_val == "favs":
+                allowed = set(db.get_favourite_paths())
+            elif filter_val.startswith("list:"):
+                list_id = int(filter_val.split(":")[1])
+                allowed = set(db.get_list_files(list_id))
+            else:
+                self.write_json({"tree": {}})
+                return
+
+            if not allowed:
+                self.write_json({"tree": {}})
+                return
+
+            # Walk all roots/serials/steps/files and keep only matching
+            indices = getattr(self.application, 'metadata_indices', {})
+            tree = {}
+            for root_label, idx in indices.items():
+                root_serials = {}
+                for serial in idx.get_serial_numbers():
+                    serial_steps = {}
+                    try:
+                        steps = idx.get_steps(serial)
+                    except ValueError:
+                        continue
+                    for step in steps:
+                        try:
+                            files = idx.get_files(serial, step)
+                        except ValueError:
+                            continue
+                        matched = [f for f in files if f["path"] in allowed]
+                        if matched:
+                            serial_steps[step] = matched
+                    if serial_steps:
+                        root_serials[serial] = serial_steps
+                if root_serials:
+                    tree[root_label] = root_serials
+            self.write_json({"tree": tree})
+        except Exception as e:
+            if config.VERBOSE:
+                logger.error(f"Error in FileTreeHandler: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in FileTreeHandler: {e}")
+            raise tornado.web.HTTPError(500, str(e))
+
+
+class ResolvePathHandler(BaseHandler):
+    """GET /api/resolve-path?path=...  → Resolve one file path.
+       POST /api/resolve-path (body: {"paths": [...]}) → Batch resolve."""
+
+    def _build_lookup(self):
+        """Build a {file_path → {root, serial, step, file}} lookup from all indices."""
+        indices = getattr(self.application, 'metadata_indices', {})
+        lookup = {}
+        for root_label, idx in indices.items():
+            for serial in idx.get_serial_numbers():
+                try:
+                    steps = idx.get_steps(serial)
+                except ValueError:
+                    continue
+                for step in steps:
+                    try:
+                        files = idx.get_files(serial, step)
+                    except ValueError:
+                        continue
+                    for f in files:
+                        lookup[f["path"]] = {
+                            "root": root_label,
+                            "serial": serial,
+                            "step": step,
+                            "file": f,
+                        }
+        return lookup
+
+    def get(self):
+        try:
+            file_path = self.get_argument("path", "")
+            if not file_path:
+                raise tornado.web.HTTPError(400, "Missing 'path' parameter")
+            lookup = self._build_lookup()
+            result = lookup.get(file_path)
+            if not result:
+                raise tornado.web.HTTPError(404, "File path not found in any index")
+            self.write_json(result)
+        except tornado.web.HTTPError:
+            raise
+        except Exception as e:
+            if config.VERBOSE:
+                logger.error(f"Error in ResolvePathHandler GET: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in ResolvePathHandler GET: {e}")
+            raise tornado.web.HTTPError(500, str(e))
+
+    def post(self):
+        """Batch resolve. Body: {"paths": ["...", "..."]}
+        Returns: {"resolved": { path: {root, serial, step, file} | null, ... }}"""
+        try:
+            data = json.loads(self.request.body)
+            paths = data.get("paths", [])
+            if not paths:
+                self.write_json({"resolved": {}})
+                return
+            lookup = self._build_lookup()
+            resolved = {}
+            for p in paths:
+                resolved[p] = lookup.get(p)
+            self.write_json({"resolved": resolved})
+        except tornado.web.HTTPError:
+            raise
+        except Exception as e:
+            if config.VERBOSE:
+                logger.error(f"Error in ResolvePathHandler POST: {e}\n{traceback.format_exc()}")
+            else:
+                logger.error(f"Error in ResolvePathHandler POST: {e}")
             raise tornado.web.HTTPError(500, str(e))

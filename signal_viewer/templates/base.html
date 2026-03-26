@@ -4,23 +4,12 @@
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
   <title>{% block title %}Signal Viewer{% endblock %}</title>
-  <link rel="stylesheet" href="/static/css/theme.css?v=32">
+  <link rel="stylesheet" href="/static/css/theme.css?v=39">
   <script src="/static/js/vendor/plotly.min.js"></script>
   {% block extra_head %}{% endblock %}
 </head>
 <body>
-  <!-- Fixed Navigation Bar -->
-  <nav class="navbar">
-    <span class="navbar-brand">Signal Viewer</span>
-    <ul class="navbar-nav">
-      <li><a href="/" class="nav-link" data-page="viewer">Viewer</a></li>
-      <li><a href="/analysis" class="nav-link" data-page="analysis">Analysis</a></li>
-      <li><a href="/comparison" class="nav-link" data-page="comparison">Comparison</a></li>
-      <li><a href="/docs" class="nav-link" data-page="docs">Docs</a></li>
-    </ul>
-  </nav>
-
-  <!-- File Selector Bar (overrideable) -->
+  <!-- File Selector Bar (topmost) -->
   {% block file_selector %}
   <div class="file-selector-bar" id="fileSelectorBar">
     <div class="form-group">
@@ -39,8 +28,29 @@
       <label>File</label>
       <div class="filter-select" id="globalFile" data-placeholder="Select file..."></div>
     </div>
+    <button class="fav-heart" id="favHeart" title="Toggle favourite" style="display:none" onclick="GlobalNav.toggleFavourite()">
+      <svg viewBox="0 0 24 24" width="20" height="20" fill="none" stroke="currentColor" stroke-width="2">
+        <path d="M20.84 4.61a5.5 5.5 0 0 0-7.78 0L12 5.67l-1.06-1.06a5.5 5.5 0 0 0-7.78 7.78l1.06 1.06L12 21.23l7.78-7.78 1.06-1.06a5.5 5.5 0 0 0 0-7.78z"/>
+      </svg>
+    </button>
+    <div class="form-group file-lists-group">
+      <label>File Lists</label>
+      <div class="filter-select" id="globalFileList" data-placeholder="All files"></div>
+    </div>
   </div>
   {% endblock %}
+
+  <!-- Navigation Bar (below file selector) -->
+  <nav class="navbar" id="navbar">
+    <ul class="navbar-nav">
+      <li><a href="/" class="nav-link" data-page="viewer">Viewer</a></li>
+      <li><a href="/analysis" class="nav-link" data-page="analysis">Analysis</a></li>
+      <li><a href="/comparison" class="nav-link" data-page="comparison">Comparison</a></li>
+      <li><a href="/comments" class="nav-link" data-page="comments">Notes</a></li>
+      <li><a href="/lists" class="nav-link" data-page="lists">Lists</a></li>
+      <li><a href="/docs" class="nav-link" data-page="docs">Docs</a></li>
+    </ul>
+  </nav>
 
   <!-- Loading Overlay -->
   <div class="loading-overlay" id="loadingOverlay">
@@ -64,6 +74,7 @@
         <div class="sidebar-empty">Select a file to browse signals</div>
       </div>
     </aside>
+    <div class="sidebar-resize-handle" id="sidebarResizeHandle"></div>
     {% endblock %}
 
     <main class="main-panel" id="mainPanel">
@@ -71,7 +82,7 @@
     </main>
   </div>
 
-  <script src="/static/js/app.js?v=32"></script>
+  <script src="/static/js/app.js?v=41"></script>
   <script>
   (function() {
     const path = window.location.pathname;

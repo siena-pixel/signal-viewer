@@ -13,10 +13,19 @@
         <option value="subplots">Subplots</option>
       </select>
     </div>
+    <div class="form-group">
+      <label for="timeSelect">Time</label>
+      <select id="timeSelect" onchange="setTimeMode(this.value)">
+        <option value="absolute">Absolute</option>
+        <option value="relative">Relative</option>
+      </select>
+    </div>
     <div class="flex-1"></div>
-    <span id="zoomIndicator" class="zoom-indicator" style="display:none"></span>
     <button id="resetZoomBtn" class="btn btn-secondary btn-sm" onclick="_resetToOverview()" style="display:none">Reset Zoom</button>
     <button class="btn btn-secondary btn-sm" onclick="clearAll()">Clear All</button>
+  </div>
+  <div class="signal-cards-toggle" id="cardsToggle" onclick="toggleCardsVisibility()">
+    <span class="toggle-arrow">&#9660;</span> <span>SIGNAL CARDS</span>
   </div>
   <div id="signalCards" class="signal-cards-row"></div>
 </div>
@@ -38,7 +47,7 @@
 const MAX_SIGNALS = 5;
 const OVERLAY_HEIGHT = 520;
 const SUBPLOT_HEIGHT_PER = 300;
-const ZOOM_DOWNSAMPLE = 5000;          // points per zoom request
+const ZOOM_DOWNSAMPLE = 8000;          // points per zoom request
 const ZOOM_DEBOUNCE_MS = 150;          // debounce zoom re-fetches
 
 let plotMode = 'overlay';
@@ -64,10 +73,8 @@ const signals = [];
 let _plotEl = null;
 let _zoomTimer = null;
 let _zoomAbort = null;   // AbortController for in-flight zoom fetches
-let _isZoomFetching = false;
 let _lastFetchedRange = null;    // { tMin, tMax } or null (full overview)
 let _lastPlotRange = null;       // { lo, hi } — x range set by last Plotly.newPlot (echo detection)
-let _lastPlotTime = 0;           // Date.now() of last Plotly.newPlot call
 
 /**
  * Custom modebar button that resets to full overview.
@@ -91,6 +98,8 @@ const _PLOTLY_CFG = {
   displayModeBar: true,
   displaylogo: false,
   showLink: false,
+  doubleClick: false,   // disable built-in "double click to zoom out" (we handle it ourselves)
+  showTips: false,      // suppress "Double-click to zoom back out" notification banner
   modeBarButtonsToRemove: ['lasso2d', 'select2d', 'resetScale2d', 'autoScale2d'],
   modeBarButtonsToAdd: [_resetModebarBtn]
 };
@@ -216,7 +225,7 @@ function computeYRange(arraysOfValues) {
 }
 
 function legendLabel(sig) {
-  const base = [sig.batch, sig.name].filter(Boolean).join(' / ');
+  const base = [sig.batch, displayName(sig.name)].filter(Boolean).join(' / ');
   return sig.units ? fmtHtml(base) + ' (' + fmtHtml(sig.units) + ')' : fmtHtml(base);
 }
 
@@ -279,10 +288,27 @@ async function addSignal(batch, idx, name, units) {
 }
 
 function removeSignal(index) {
+  const wasZoomed = _lastFetchedRange;
   signals.splice(index, 1);
   signals.forEach((s, i) => { s.color = getSignalColor(i); });
-  _lastFetchedRange = null;
-  renderAll();
+  if (signals.length === 0) {
+    _cancelZoom();
+    _lastFetchedRange = null;
+    renderAll();
+  } else if (wasZoomed) {
+    // Immediately re-render remaining signals at the zoomed range
+    // (using their existing data). _reactPlot sets _lastPlotRange which
+    // causes onRelayout to ignore the echo Plotly fires back.
+    _reactPlot(wasZoomed.tMin, wasZoomed.tMax);
+    renderCards();
+    updateSidebarActive();
+    saveState();
+    // Re-fetch remaining signals at the saved zoom range
+    _scheduleZoomFetch(wasZoomed.tMin, wasZoomed.tMax);
+  } else {
+    _lastFetchedRange = null;
+    renderAll();
+  }
 }
 
 function clearAll() {
@@ -297,16 +323,66 @@ function setPlotMode(mode) {
   const wasZoomed = _lastFetchedRange !== null;
   _lastFetchedRange = null;
   if (wasZoomed && signals.length > 0) {
-    // Signal data arrays still contain zoomed subset — must re-fetch overview
-    // before rendering in the new layout mode, otherwise the data is a tiny
-    // sliver against the full x-range and the signal looks blank.
     _cancelZoom();
-    _isZoomFetching = false;
-    _doZoomFetch(null, null, null, null);   // fetches overview, then _reactPlot
+    _doZoomFetch(null, null, null, null);
     updateSidebarActive();
   } else {
     renderAll();
   }
+}
+
+// ── Time mode (Absolute / Relative) ──────────────────────────────────────
+
+let timeMode = 'absolute';
+
+function setTimeMode(mode) {
+  timeMode = mode;
+  renderAll();
+}
+
+/**
+ * Transform time arrays according to the current time mode.
+ * - absolute: raw epoch ms (unchanged)
+ * - relative: offset from the earliest t0 across all signals, in seconds
+ */
+function getDisplayTime(sig) {
+  if (timeMode === 'relative' && signals.length > 0) {
+    const globalT0 = Math.min(...signals.map(s => s.tStart));
+    return sig.timeRaw.map(t => (t - globalT0) / 1000.0);
+  }
+  return sig.timeRaw;
+}
+
+function getDisplayTimeRange() {
+  if (timeMode === 'relative' && signals.length > 0) {
+    const globalT0 = Math.min(...signals.map(s => s.tStart));
+    let lo = Infinity, hi = -Infinity;
+    signals.forEach(s => {
+      const rLo = (safeMin(s.timeRaw) - globalT0) / 1000.0;
+      const rHi = (safeMax(s.timeRaw) - globalT0) / 1000.0;
+      if (rLo < lo) lo = rLo;
+      if (rHi > hi) hi = rHi;
+    });
+    return { lo, hi };
+  }
+  let lo = Infinity, hi = -Infinity;
+  signals.forEach(s => {
+    const sLo = safeMin(s.timeRaw), sHi = safeMax(s.timeRaw);
+    if (sLo < lo) lo = sLo;
+    if (sHi > hi) hi = sHi;
+  });
+  return { lo, hi };
+}
+
+// ── Collapsible signal cards ─────────────────────────────────────────────
+
+function toggleCardsVisibility() {
+  const cards = document.getElementById('signalCards');
+  const toggle = document.getElementById('cardsToggle');
+  if (!cards || !toggle) return;
+  const hidden = cards.style.display === 'none';
+  cards.style.display = hidden ? 'flex' : 'none';
+  toggle.classList.toggle('collapsed', !hidden);
 }
 
 // ── Rendering ─────────────────────────────────────────────────────────────
@@ -336,14 +412,20 @@ function renderCards() {
     card.innerHTML = `
       <div class="card-close" onclick="removeSignal(${i})">\u2715</div>
       <div class="card-batch">${fmtHtml(sig.batch)}</div>
-      <div class="card-name" style="color:${sig.color}">${fmtHtml(sig.name)}</div>
-      <div class="card-value" id="cv-${i}">--</div>
-      <div class="card-units">${fmtHtml(sig.units) || '--'}</div>
+      <div class="card-name" style="color:${sig.color}">${fmtHtml(displayName(sig.name))}</div>
+      <div class="card-value-row">
+        <span class="card-value" id="cv-${i}">--</span>
+        <span class="card-units">${fmtHtml(sig.units) || ''}</span>
+      </div>
       <div class="card-hover-info" id="chi-${i}"></div>
       <div class="card-sample" id="cs-${i}">${ratio ? 'pts ' + ratio : ''}</div>
     `;
     container.appendChild(card);
   });
+
+  // Update toggle visibility
+  const toggle = document.getElementById('cardsToggle');
+  if (toggle) toggle.style.display = signals.length > 0 ? 'flex' : 'none';
 }
 
 // ── Plotting ──────────────────────────────────────────────────────────────
@@ -356,10 +438,61 @@ function renderCards() {
 function _xAxisConfig(extra) {
   return {
     ...PLOT_CONFIG.axis,
-    title: { text: 'Time (h:m:s)' },
+    title: { text: timeMode === 'relative' ? 'Time (h:m:s)' : 'Time (h:m:s)' },
     type: 'linear',
     ...extra
   };
+}
+
+/**
+ * Build tick labels for relative time axis.
+ * Input values are in seconds. Formats as H:MM:SS or H:MM:SS.mmm.
+ */
+function _buildRelativeTimeTicks(loSec, hiSec) {
+  if (!isFinite(loSec) || !isFinite(hiSec) || loSec >= hiSec) return {};
+
+  const span = hiSec - loSec;
+  // Choose nice step in seconds
+  const niceSteps = [
+    0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.2, 0.5,
+    1, 2, 5, 10, 15, 30,
+    60, 120, 300, 600, 900, 1800,
+    3600, 7200, 14400, 21600, 43200,
+    86400
+  ];
+  const rawStep = span / 10;
+  let step = niceSteps[niceSteps.length - 1];
+  for (let i = 0; i < niceSteps.length; i++) {
+    if (niceSteps[i] >= rawStep) { step = niceSteps[i]; break; }
+  }
+
+  const first = Math.ceil(loSec / step) * step;
+  const tickvals = [];
+  const ticktext = [];
+  for (let v = first; v <= hiSec; v += step) {
+    tickvals.push(v);
+    ticktext.push(_relTickLabel(v, step));
+  }
+  return { tickvals, ticktext };
+}
+
+/** Format relative seconds as H:MM:SS or H:MM:SS.mmm */
+function _relTickLabel(totalSec, step) {
+  const neg = totalSec < 0;
+  const abs = Math.abs(totalSec);
+  const h = Math.floor(abs / 3600);
+  const m = Math.floor((abs % 3600) / 60);
+  const s = abs % 60;
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const prefix = neg ? '-' : '';
+
+  if (step >= 1) {
+    return `${prefix}${h}:${pad2(m)}:${pad2(Math.floor(s))}`;
+  }
+  // Sub-second: include milliseconds
+  const sFloor = Math.floor(s);
+  const ms = Math.round((s - sFloor) * 1000);
+  return `${prefix}${h}:${pad2(m)}:${pad2(sFloor)}.${String(ms).padStart(3, '0')}`;
 }
 
 function renderPlot() {
@@ -391,14 +524,17 @@ function renderPlot() {
   el.on('plotly_doubleclick', onDoubleClick);
 
   _plotEl = el;
-  _updateZoomIndicator(null);
+  // Preserve zoom indicator if we are currently zoomed (e.g. time mode switch)
+  if (!_lastFetchedRange) {
+    _updateZoomIndicator(null);
+  }
 }
 
 function plotOverlay(el) {
   const totalPts = signals.reduce((s, sig) => s + sig.timeRaw.length, 0);
   _log('info', `plotOverlay: ${signals.length} signals, ${totalPts} total points`);
   const traces = signals.map(sig => ({
-    x: sig.timeRaw, y: sig.values,
+    x: getDisplayTime(sig), y: sig.values,
     name: legendLabel(sig),
     type: 'scattergl', mode: 'lines',
     line: { color: sig.color, width: 1.5 },
@@ -407,14 +543,12 @@ function plotOverlay(el) {
 
   const yRange = computeYRange(signals.map(s => s.values));
 
-  // Compute explicit time range (NEVER rely on autorange — it fires
-  // spurious relayout events that create feedback loops)
-  // NOTE: uses safe loop-based min/max to avoid stack overflow on large arrays
-  let tLo = Infinity, tHi = -Infinity;
-  signals.forEach(s => { const lo = safeMin(s.timeRaw), hi = safeMax(s.timeRaw); if (lo < tLo) tLo = lo; if (hi > tHi) tHi = hi; });
-  const pad = (tHi - tLo) * 0.01 || 1;
-  const xLo = tLo - pad, xHi = tHi + pad;
-  const ticks = _buildTimeTicks(xLo, xHi);
+  const range = getDisplayTimeRange();
+  const pad = (range.hi - range.lo) * 0.01 || 1;
+  const xLo = range.lo - pad, xHi = range.hi + pad;
+  const ticks = timeMode === 'absolute'
+    ? _buildTimeTicks(xLo, xHi)
+    : _buildRelativeTimeTicks(xLo, xHi);
 
   const layout = {
     xaxis: _xAxisConfig({
@@ -441,7 +575,7 @@ function plotOverlay(el) {
   };
 
   _lastPlotRange = { lo: xLo, hi: xHi };
-  _lastPlotTime = Date.now();
+
   Plotly.purge(el);  // release previous WebGL contexts (harmless in SVG mode)
   Plotly.newPlot(el, traces, layout, _PLOTLY_CFG);
 }
@@ -465,14 +599,12 @@ function plotSubplots(el) {
   };
 
   // Compute explicit synced time range for ALL subplot axes
-  // (NO matches:'x' — it causes event-routing bugs with scattergl;
-  //  instead we set identical explicit range on every axis)
-  // NOTE: uses safe loop-based min/max to avoid stack overflow on large arrays
-  let tLo = Infinity, tHi = -Infinity;
-  signals.forEach(s => { const lo = safeMin(s.timeRaw), hi = safeMax(s.timeRaw); if (lo < tLo) tLo = lo; if (hi > tHi) tHi = hi; });
-  const pad = (tHi - tLo) * 0.01 || 1;
-  const xLo = tLo - pad, xHi = tHi + pad;
-  const ticks = _buildTimeTicks(xLo, xHi);
+  const range = getDisplayTimeRange();
+  const pad = (range.hi - range.lo) * 0.01 || 1;
+  const xLo = range.lo - pad, xHi = range.hi + pad;
+  const ticks = timeMode === 'absolute'
+    ? _buildTimeTicks(xLo, xHi)
+    : _buildRelativeTimeTicks(xLo, xHi);
   const xRange = { range: [xLo, xHi], autorange: false, ...ticks };
 
   signals.forEach((sig, i) => {
@@ -503,7 +635,7 @@ function plotSubplots(el) {
     };
 
     traces.push({
-      x: sig.timeRaw, y: sig.values,
+      x: getDisplayTime(sig), y: sig.values,
       name: legendLabel(sig),
       type: 'scattergl', mode: 'lines',
       line: { color: sig.color, width: 1.5 },
@@ -515,7 +647,7 @@ function plotSubplots(el) {
   });
 
   _lastPlotRange = { lo: xLo, hi: xHi };
-  _lastPlotTime = Date.now();
+
   Plotly.purge(el);  // release previous WebGL contexts before creating new ones
   Plotly.newPlot(el, traces, layout, _PLOTLY_CFG);
 }
@@ -534,7 +666,6 @@ function plotSubplots(el) {
 function _resetToOverview() {
   if (_lastFetchedRange === null) {
     // Already at overview — but still re-render to fix any visual issues
-    // (e.g. Plotly autoranged to wrong extent after double-click)
     if (signals.length > 0) {
       _reactPlot(null, null);
       _updateZoomIndicator(null);
@@ -542,17 +673,28 @@ function _resetToOverview() {
     return;
   }
   _cancelZoom();
-  _isZoomFetching = false;
   // Immediate fetch — reset is a deliberate user action, no debounce needed
   _doZoomFetch(null, null, null, null);
 }
 
 /**
- * Handle Plotly relayout events (zoom, pan, autoscale, reset).
+ * Handle Plotly relayout events — specifically, user-initiated zoom/pan.
  *
- * KEY DESIGN: No time-based suppression (that blocks legitimate user clicks).
- * Instead, uses precise RANGE COMPARISON to detect and ignore "echo" events
- * that Plotly fires after our own Plotly.newPlot() calls.
+ * KEY DESIGN DECISIONS:
+ *
+ * 1. We ONLY process explicit range-change events (xaxis.range[0]/[1]).
+ *    Autorange events (xaxis.autorange=true) are NEVER handled here because
+ *    we've disabled every Plotly feature that produces them:
+ *      - doubleClick: false  (in Plotly config)
+ *      - Removed resetScale2d & autoScale2d modebar buttons
+ *    Our own reset is handled via plotly_doubleclick event and custom buttons,
+ *    which call _resetToOverview() directly.  Therefore, every autorange event
+ *    in relayout is an echo from our own Plotly.newPlot() calls and is ignored.
+ *
+ * 2. Echo detection uses RANGE COMPARISON, not timing or boolean flags.
+ *    After every Plotly.newPlot(), we record the range in _lastPlotRange.
+ *    If a relayout event reports the same range, it's an echo and is skipped.
+ *    This is deterministic — no race conditions, no timing windows.
  *
  * Scans ALL xaxis keys so that zooming on any subplot is detected.
  * Because the x-axis is type:'linear', all range values are plain numbers.
@@ -562,23 +704,7 @@ function onRelayout(eventData) {
 
   const keys = Object.keys(eventData);
 
-  // ── Detect autorange on ANY x-axis ────────────────────────────────────
-  // This catches: double-click, Autoscale button, Reset axes button.
-  // Always honoured, even if a zoom fetch is in progress.
-  const hasAutorange = keys.some(k =>
-    /^xaxis\d*\.autorange$/.test(k) && eventData[k] === true
-  );
-  if (hasAutorange) {
-    // Ignore autorange events that echo from our own newPlot (within 200ms)
-    if (Date.now() - _lastPlotTime < 200) return;
-    _resetToOverview();
-    return;
-  }
-
-  // All other relayout events are skipped while a fetch is in progress
-  if (_isZoomFetching) return;
-
-  // ── Detect range change on ANY x-axis (subplot support) ───────────────
+  // ── Extract range change from ANY x-axis (subplot support) ────────────
   let tMin, tMax;
 
   // Form 1:  xaxis.range[0] / xaxis.range[1]  (or xaxis2.range[0], etc.)
@@ -610,22 +736,23 @@ function onRelayout(eventData) {
     }
   }
 
+  // No range data → not a zoom/pan event (autorange, shapes, etc.) → ignore
   if (tMin == null || tMax == null) return;
 
-  // ── Ignore echo events from our own Plotly.newPlot() ──────────────────
-  // After _reactPlot/plotOverlay/plotSubplots set an explicit range, Plotly
-  // fires back a relayout with that same range.  We detect this precisely by
-  // comparing against _lastPlotRange (tolerance 2ms to handle float rounding).
+  // ── Echo detection: ignore range events that mirror what we just set ───
+  // After _reactPlot/plotOverlay/plotSubplots call Plotly.newPlot() with an
+  // explicit range, Plotly fires back a relayout with that same range.
+  // Tolerance of 0.5 handles float rounding.
   if (_lastPlotRange &&
-      Math.abs(_lastPlotRange.lo - tMin) < 2 &&
-      Math.abs(_lastPlotRange.hi - tMax) < 2) {
+      Math.abs(_lastPlotRange.lo - tMin) < 0.5 &&
+      Math.abs(_lastPlotRange.hi - tMax) < 0.5) {
     return;
   }
 
-  // Skip if we already fetched this exact range
+  // Skip if we already fetched this exact display range
   if (_lastFetchedRange &&
-      Math.abs(_lastFetchedRange.tMin - tMin) < 2 &&
-      Math.abs(_lastFetchedRange.tMax - tMax) < 2) {
+      Math.abs(_lastFetchedRange.tMin - tMin) < 0.5 &&
+      Math.abs(_lastFetchedRange.tMax - tMax) < 0.5) {
     return;
   }
 
@@ -656,18 +783,34 @@ function _cancelZoom() {
  * zoomed (e.g. xaxis2) is different from the primary (xaxis), and reading
  * the primary would overwrite the zoom range with the overview range.
  *
- * A 5% margin is added on each side of the display range so the fetched
- * data extends beyond the visible edges, eliminating low-res strips.
+ * A small margin (2%) is added on each side of the display range so the
+ * fetched data extends just beyond the visible edges for clean rendering.
+ * The server also expands the slice by ~2% in sample space, so the
+ * combined margin is sufficient for LTTB to produce clean edge points
+ * without wasting the point budget on large off-screen regions.
  */
 function _scheduleZoomFetch(tMin, tMax) {
   _cancelZoom();
   _zoomTimer = setTimeout(() => {
-    // Display range = exactly what the relayout event reported
+    // Display range = exactly what the relayout event reported (in display coords)
     const displayMin = tMin, displayMax = tMax;
-    // Fetch range = display range + 5% margin on each side
-    const margin = (displayMax - displayMin) * 0.05;
-    const fetchMin = displayMin - margin;
-    const fetchMax = displayMax + margin;
+
+    // Convert display coords to epoch ms for the API fetch.
+    // Use a 2% margin on each side — just enough for clean edge rendering.
+    // (The server adds its own ~2% sample expansion on top of this.)
+    let fetchMin, fetchMax;
+    if (timeMode === 'relative' && signals.length > 0) {
+      const globalT0 = Math.min(...signals.map(s => s.tStart));
+      const apiMin = globalT0 + tMin * 1000.0;
+      const apiMax = globalT0 + tMax * 1000.0;
+      const margin = (apiMax - apiMin) * 0.02;
+      fetchMin = apiMin - margin;
+      fetchMax = apiMax + margin;
+    } else {
+      const margin = (displayMax - displayMin) * 0.02;
+      fetchMin = displayMin - margin;
+      fetchMax = displayMax + margin;
+    }
     _doZoomFetch(fetchMin, fetchMax, displayMin, displayMax);
   }, ZOOM_DEBOUNCE_MS);
 }
@@ -687,7 +830,6 @@ async function _doZoomFetch(fetchMin, fetchMax, displayMin, displayMax) {
   _zoomAbort = new AbortController();
   const { signal: abortSignal } = _zoomAbort;
 
-  _isZoomFetching = true;
   _updateZoomIndicator('loading');
 
   // Use display range for the duplicate-fetch guard and _reactPlot
@@ -732,7 +874,6 @@ async function _doZoomFetch(fetchMin, fetchMax, displayMin, displayMax) {
     if (!anyData) {
       _log('warn', 'Zoom fetch returned no data for any signal');
       _updateZoomIndicator('error');
-      _isZoomFetching = false;
       return;
     }
 
@@ -745,10 +886,18 @@ async function _doZoomFetch(fetchMin, fetchMax, displayMin, displayMax) {
     renderCards();
     saveState();
 
-    // Compute zoom level for indicator
+    // Compute zoom level for indicator (reset zoom button visibility)
     if (dMin != null && dMax != null) {
-      let fullSpan = 0;
-      signals.forEach(s => { const sp = s.tEnd - s.tStart; if (sp > fullSpan) fullSpan = sp; });
+      let fullSpan;
+      if (timeMode === 'relative' && signals.length > 0) {
+        const globalT0 = Math.min(...signals.map(s => s.tStart));
+        const totalLo = Math.min(...signals.map(s => (s.tStart - globalT0) / 1000.0));
+        const totalHi = Math.max(...signals.map(s => (s.tEnd - globalT0) / 1000.0));
+        fullSpan = totalHi - totalLo;
+      } else {
+        fullSpan = 0;
+        signals.forEach(s => { const sp = s.tEnd - s.tStart; if (sp > fullSpan) fullSpan = sp; });
+      }
       const viewSpan = dMax - dMin;
       const zoomPct = fullSpan > 0 ? ((viewSpan / fullSpan) * 100) : 100;
       _updateZoomIndicator(zoomPct);
@@ -760,8 +909,6 @@ async function _doZoomFetch(fetchMin, fetchMax, displayMin, displayMax) {
     if (err.name === 'AbortError') return; // expected on rapid zoom
     _log('error', 'Zoom fetch failed:', err.message, err.stack);
     _updateZoomIndicator('error');
-  } finally {
-    _isZoomFetching = false;
   }
 }
 
@@ -785,24 +932,27 @@ function _reactPlot(tMin, tMax) {
   // feedback loops (Plotly computes range → fires relayout → we detect zoom).
   let xLo, xHi;
   if (tMin != null && tMax != null) {
+    // tMin/tMax are in display-coordinate space (relative seconds or epoch ms)
     xLo = tMin;
     xHi = tMax;
   } else {
     // Overview: use full signal time extent with 1% padding
-    xLo = Infinity; xHi = -Infinity;
-    signals.forEach(s => { if (s.tStart < xLo) xLo = s.tStart; if (s.tEnd > xHi) xHi = s.tEnd; });
+    const range = getDisplayTimeRange();
+    xLo = range.lo; xHi = range.hi;
     const pad = (xHi - xLo) * 0.01 || 1;
     xLo -= pad;
     xHi += pad;
   }
-  const ticks = _buildTimeTicks(xLo, xHi);
+  const ticks = timeMode === 'absolute'
+    ? _buildTimeTicks(xLo, xHi)
+    : _buildRelativeTimeTicks(xLo, xHi);
   const xRangeProps = { range: [xLo, xHi], autorange: false, ...ticks };
 
   let traces, layout;
 
   if (plotMode === 'overlay') {
     traces = signals.map((sig, i) => ({
-      x: sig.timeRaw, y: sig.values,
+      x: getDisplayTime(sig), y: sig.values,
       name: legendLabel(sig),
       type: 'scattergl', mode: 'lines',
       line: { color: sig.color, width: 1.5 },
@@ -877,7 +1027,7 @@ function _reactPlot(tMin, tMax) {
       };
 
       traces.push({
-        x: sig.timeRaw, y: sig.values,
+        x: getDisplayTime(sig), y: sig.values,
         name: legendLabel(sig),
         type: 'scattergl', mode: 'lines',
         line: { color: sig.color, width: 1.5 },
@@ -892,7 +1042,7 @@ function _reactPlot(tMin, tMax) {
   // Record what range we're setting — onRelayout uses this to ignore
   // the "echo" event that Plotly fires after newPlot.
   _lastPlotRange = { lo: xLo, hi: xHi };
-  _lastPlotTime = Date.now();
+
 
   // Purge old WebGL contexts then full newPlot for complete buffer refresh.
   Plotly.purge(el);
@@ -907,35 +1057,19 @@ function _reactPlot(tMin, tMax) {
 }
 
 function _updateZoomIndicator(state) {
-  const el = document.getElementById('zoomIndicator');
   const resetBtn = document.getElementById('resetZoomBtn');
-  if (!el) return;
+  if (!resetBtn) return;
 
   if (state === null || state === undefined) {
-    el.style.display = 'none';
-    if (resetBtn) resetBtn.style.display = 'none';
+    resetBtn.style.display = 'none';
     return;
   }
-  el.style.display = 'inline-block';
 
-  if (state === 'loading') {
-    el.textContent = 'Refining\u2026';
-    el.className = 'zoom-indicator loading';
-    if (resetBtn) resetBtn.style.display = 'inline-block';
-  } else if (state === 'error') {
-    el.textContent = 'Zoom fetch failed';
-    el.className = 'zoom-indicator error';
-    if (resetBtn) resetBtn.style.display = 'inline-block';
+  if (state === 'loading' || state === 'error') {
+    resetBtn.style.display = 'inline-block';
   } else {
     const pct = Number(state);
-    if (pct >= 99) {
-      el.style.display = 'none';
-      if (resetBtn) resetBtn.style.display = 'none';
-    } else {
-      el.textContent = `Viewing ${pct.toFixed(1)}% of signal`;
-      el.className = 'zoom-indicator';
-      if (resetBtn) resetBtn.style.display = 'inline-block';
-    }
+    resetBtn.style.display = pct >= 99 ? 'none' : 'inline-block';
   }
 }
 
